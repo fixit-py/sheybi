@@ -2,18 +2,24 @@
 
 Auth has been intentionally removed for now. This backend currently exposes only:
 
-- `GET /health`
+added auth.p and all api routes are guided with auth.py
 
-## Market API (in-memory)
-- `POST /api/markets` `{ start, close }` (ISO8601; e.g. `2026-05-28T12:00:00Z`)
-- `GET /api/markets`
-- `GET /api/markets/<id>`
-- `POST /api/markets/<id>/buy` `{ user, side: YES|NO, amount, t? }`
-- `POST /api/markets/<id>/sell` `{ user, side: YES|NO, shares, t? }`
-- `POST /api/markets/<id>/resolve` `{ outcome: YES|NO }`
+current Flask storage: markets: dict[str, Market] = {}
+ we would have to checge this to use instantdb 
+
+So eventually you’ll replace it to: markets[market_id] = Market(...)
+create market in InstantDB
+fetch market from InstantDB
+persist trades there
 
 ## Install
 `pip install -r backend/requirements.txt`
 
 ## Run
 `python -m backend.app`
+
+
+oi installed cors flask cause i was getiting cros browswer issue 
+installed pip install python-dotenv
+
+basiclly i think i am done with adding auth, rub npm run dev for the froneend, and also run phyton app.py for the backend and we are golden then. so continue from stone xoxo

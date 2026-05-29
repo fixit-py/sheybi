@@ -1,4 +1,5 @@
 from __future__ import annotations
+from flask_cors import CORS
 
 import os
 import uuid
@@ -7,13 +8,25 @@ from datetime import datetime, timezone
 from typing import Any
 
 from flask import Flask, jsonify
-from flask import request
+from flask import request, g # g is the global context object
 
+from dotenv import load_dotenv
+load_dotenv()
+
+
+import sys
+sys.path.append(
+    os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..")
+    )
+)
 from market import Market, Side
+
+from backend.auth import require_auth # this is the auth middleware
 
 def create_app() -> Flask:
     app = Flask(__name__)
-
+    CORS(app, origins=["http://localhost:3000"])
     markets: dict[str, Market] = {}
 
     def parse_dt(value: str) -> datetime:
@@ -30,10 +43,12 @@ def create_app() -> Flask:
         return datetime.now(timezone.utc)
 
     @app.get("/health")
+    #@require_auth // this is the auth middleware
     def health():
         return jsonify({"ok": True})
 
     @app.post("/api/markets")
+    @require_auth # this is the auth middleware
     def create_market():
         data = request.get_json(silent=True) or {}
         start_raw = data.get("start")
@@ -53,6 +68,7 @@ def create_app() -> Flask:
         return jsonify({"id": market_id, "start": start.isoformat(), "close": close.isoformat()}), 201
 
     @app.get("/api/markets")
+    @require_auth # this is the auth middleware
     def list_markets():
         out = []
         for mid, m in markets.items():
@@ -60,12 +76,13 @@ def create_app() -> Flask:
         return jsonify({"markets": out})
 
     @app.get("/api/markets/<market_id>")
+    @require_auth # this is the auth middleware
     def get_market(market_id: str):
         m = markets.get(market_id)
         if not m:
             return jsonify({"error": "not_found"}), 404
         t = now_utc()
-        return jsonify(
+        return jsonify( 
             {
                 "id": market_id,
                 "start": m.start.isoformat(),
@@ -75,12 +92,14 @@ def create_app() -> Flask:
         )
 
     @app.post("/api/markets/<market_id>/buy")
+    @require_auth # this is the auth middleware
     def buy(market_id: str):
         m = markets.get(market_id)
         if not m:
             return jsonify({"error": "not_found"}), 404
         data = request.get_json(silent=True) or {}
-        user = (data.get("user") or "").strip()
+        #user = (data.get("user") or "").strip() this was fola's old code
+        user = g.clerk_user_id # this is the auth middleware
         side_raw = (data.get("side") or "").strip().upper()
         amount = data.get("amount")
         t_raw = data.get("t")
@@ -121,12 +140,14 @@ def create_app() -> Flask:
         )
 
     @app.post("/api/markets/<market_id>/sell")
+    @require_auth # this is the auth middleware
     def sell(market_id: str):
         m = markets.get(market_id)
         if not m:
             return jsonify({"error": "not_found"}), 404
         data = request.get_json(silent=True) or {}
-        user = (data.get("user") or "").strip()
+        user = g.clerk_user_id # this is the auth middleware
+        #user = (data.get("user") or "").strip() this was fola's old code
         side_raw = (data.get("side") or "").strip().upper()
         shares = data.get("shares")
         t_raw = data.get("t")
@@ -153,6 +174,7 @@ def create_app() -> Flask:
         return jsonify({"payout": payout, "state": m.market_state(t)})
 
     @app.post("/api/markets/<market_id>/resolve")
+    @require_auth # this is the auth middleware
     def resolve(market_id: str):
         m = markets.get(market_id)
         if not m:
