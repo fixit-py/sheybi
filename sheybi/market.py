@@ -287,7 +287,9 @@ class Market:
         rep = self.reputation(user)
 
         # Log scaling prevents whales
-        normalized_stake = math.log1p(eligible)
+        # Use the pre-fee amount for signal strength / probability so platform
+        # fees don't distort the displayed chance.
+        normalized_stake = math.log1p(amount)
 
         # Confidence based on conviction
         market_p = self.probability_yes(now)
@@ -325,7 +327,7 @@ class Market:
         trade = Trade(
             user=user,
             side=side,
-            amount=eligible,
+            amount=amount,
             timestamp=now,
             reputation=rep,
             confidence=confidence,
@@ -567,21 +569,43 @@ class Market:
         now: datetime
     ) -> dict:
 
-        return {
-            "probability_yes": round(
-                self.displayed_probability(now),
-                4
-            ),
+        chance_yes = self.probability_yes(now)
+        chance_yes = clamp(chance_yes, 0.0, 1.0)
 
-            "probability_no": round(
-                1.0 - self.displayed_probability(now),
-                4
-            ),
+        display_yes = self.displayed_probability(now)
+        display_yes = clamp(display_yes, 0.0, 1.0)
+        if len(self.trades) <= 0:
+            # Before the first trade, show clean 50/50-style prices (no fee baked in).
+            yes_price_gross = display_yes
+            no_price_gross = 1.0 - display_yes
+        else:
+            fee_rate = self.fee_rate(now, 1.0)
+            denom = max(1.0 - fee_rate, 1e-9)
+
+            # "Price" including fees: gross cost per $1 of net exposure.
+            yes_price_gross = clamp(display_yes / denom, 0.0, 1.0)
+            no_price_gross = clamp((1.0 - display_yes) / denom, 0.0, 1.0)
+
+        return {
+            # Raw, pre-calibration chance (not adjusted by confidence).
+            "chance_yes": round(chance_yes, 4),
+            "chance_no": round(1.0 - chance_yes, 4),
+
+            # Calibrated probability used for UI display/mint pricing.
+            "probability_yes": round(display_yes, 4),
+            "probability_no": round(1.0 - display_yes, 4),
+
+            # Fee-baked "prices" (what users effectively pay after fees).
+            "price_yes": round(yes_price_gross, 4),
+            "price_no": round(no_price_gross, 4),
 
             "confidence": round(
                 self.confidence(now),
                 4
             ),
+
+            "resolved": self.resolved,
+            "outcome": self.outcome.value if self.outcome else None,
 
             "entropy": round(
                 self.entropy(now),
@@ -591,14 +615,4 @@ class Market:
             "traders": len(self.traders),
 
             "trades": len(self.trades),
-
-            "escrow": round(
-                self.escrow,
-                2
-            ),
-
-            "revenue": round(
-                self.revenue,
-                2
-            )
         }

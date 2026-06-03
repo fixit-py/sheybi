@@ -1,26 +1,262 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+@custom-variant dark (&:is(.dark *));
 
 @theme inline {
+  /* Default shadcn / tailwind mappings */
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
+  --font-sans: var(--font-sans);
   --font-mono: var(--font-geist-mono);
+  --font-heading: var(--font-sans);
+
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+
+  /* Overriding standard Slate colors with Sheybi surface container scale */
+  --color-slate-50: var(--surface-bright);
+  --color-slate-100: var(--surface-container-low);
+  --color-slate-200: var(--surface-container);
+  --color-slate-300: var(--surface-container-high);
+  --color-slate-400: var(--surface-container-highest);
+  --color-slate-500: var(--on-surface-variant);
+  --color-slate-600: var(--on-surface-variant);
+  --color-slate-700: var(--on-surface-variant);
+  --color-slate-800: var(--inverse-surface);
+  --color-slate-900: var(--on-surface);
+
+  /* Registering Custom Sheybi tokens */
+  --color-surface: var(--surface);
+  --color-surface-dim: var(--surface-dim);
+  --color-surface-bright: var(--surface-bright);
+  --color-surface-container-lowest: var(--surface-container-lowest);
+  --color-surface-container-low: var(--surface-container-low);
+  --color-surface-container: var(--surface-container);
+  --color-surface-container-high: var(--surface-container-high);
+  --color-surface-container-highest: var(--surface-container-highest);
+
+  --color-on-surface: var(--on-surface);
+  --color-on-surface-variant: var(--on-surface-variant);
+
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+
+  --color-primary-hover: var(--primary-hover);
+
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-warning: var(--warning);
+  --color-info: var(--info);
+  --color-trending-accent: var(--trending-accent);
+
+  /* Sheybi Border Radius System */
+  --radius-xs: calc(var(--radius) * 0.25);
+  --radius-sm: calc(var(--radius) * 0.5);
+  --radius-md: calc(var(--radius) * 0.75);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+:root {
+  /* Sheybi Light Theme configuration */
+  --background: #f7f8fc;
+  --foreground: #1b1b24;
+  --card: #ffffff;
+  --card-foreground: #1b1b24;
+  --popover: #ffffff;
+  --popover-foreground: #1b1b24;
+
+  --primary: #4f46e5;
+  --primary-foreground: #ffffff;
+  --primary-hover: #4338ca;
+
+  --secondary: #5c5e62;
+  --secondary-foreground: #ffffff;
+
+  --muted: #f2f4fa;
+  --muted-foreground: #6b7280;
+
+  --accent: #f2f4fa;
+  --accent-foreground: #1b1b24;
+
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
+
+  --border: #d9dde8;
+  --input: #d9dde8;
+  --ring: #4f46e5;
+
+  --chart-1: #4f46e5;
+  --chart-2: #5c5e62;
+  --chart-3: #ff6a3d;
+  --chart-4: #0ea5e9;
+  --chart-5: #16a34a;
+
+  --radius: 1rem;
+  /* 16px */
+
+  /* Sheybi Custom Colors (Light Theme) */
+  --surface: #ffffff;
+  --surface-dim: #dcd8e5;
+  --surface-bright: #fcf8ff;
+  --surface-container-lowest: #ffffff;
+  --surface-container-low: #f5f2ff;
+  --surface-container: #f0ecf9;
+  --surface-container-high: #eae6f4;
+  --surface-container-highest: #e4e1ee;
+
+  --on-surface: #1b1b24;
+  --on-surface-variant: #464555;
+  --inverse-surface: #302f39;
+
+  --text-primary: #111827;
+  --text-secondary: #4b5563;
+  --text-muted: #6b7280;
+
+  --primary-hover: #4338ca;
+
+  --success: #16a34a;
+  --success-soft: #dcfce7;
+  --danger: #dc2626;
+  --danger-soft: #fee2e2;
+  --warning: #f59e0b;
+  --info: #0ea5e9;
+  --trending-accent: #ff6a3d;
+
+  /* Sidebar Component specific themes */
+  --sidebar: #ffffff;
+  --sidebar-foreground: #1b1b24;
+  --sidebar-primary: #4f46e5;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #f5f2ff;
+  --sidebar-accent-foreground: #1b1b24;
+  --sidebar-border: #d9dde8;
+  --sidebar-ring: #4f46e5;
+}
+
+.dark {
+  /* Sheybi Dark Theme configuration */
+  --background: #121218;
+  --foreground: #f3effc;
+  --card: #1b1b24;
+  --card-foreground: #f3effc;
+  --popover: #1b1b24;
+  --popover-foreground: #f3effc;
+
+  --primary: #c3c0ff;
+  --primary-foreground: #0f0069;
+  --primary-hover: #a5a1ff;
+
+  --secondary: #c5c6ca;
+  --secondary-foreground: #191c1f;
+
+  --muted: #302f39;
+  --muted-foreground: #c7c4d8;
+
+  --accent: #302f39;
+  --accent-foreground: #f3effc;
+
+  --destructive: #ba1a1a;
+  --destructive-foreground: #ffffff;
+
+  --border: #464555;
+  --input: #464555;
+  --ring: #c3c0ff;
+
+  --chart-1: #c3c0ff;
+  --chart-2: #c5c6ca;
+  --chart-3: #ffb695;
+  --chart-4: #0ea5e9;
+  --chart-5: #16a34a;
+
+  /* Sheybi Custom Colors (Dark Theme) */
+  --surface: #1b1b24;
+  --surface-dim: #121218;
+  --surface-bright: #242430;
+  --surface-container-lowest: #0e0e12;
+  --surface-container-low: #15151c;
+  --surface-container: #1b1b24;
+  --surface-container-high: #21212c;
+  --surface-container-highest: #282835;
+
+  --on-surface: #f3effc;
+  --on-surface-variant: #c7c4d8;
+  --inverse-surface: #f3effc;
+
+  --text-primary: #f3effc;
+  --text-secondary: #c7c4d8;
+  --text-muted: #777587;
+
+  --primary-hover: #a5a1ff;
+
+  --success: #16a34a;
+  --success-soft: #143a1d;
+  --danger: #ba1a1a;
+  --danger-soft: #441010;
+  --warning: #f59e0b;
+  --info: #0ea5e9;
+  --trending-accent: #ff6a3d;
+
+  /* Sidebar Component specific themes */
+  --sidebar: #1b1b24;
+  --sidebar-foreground: #f3effc;
+  --sidebar-primary: #c3c0ff;
+  --sidebar-primary-foreground: #0f0069;
+  --sidebar-accent: #21212c;
+  --sidebar-accent-foreground: #f3effc;
+  --sidebar-border: #302f39;
+  --sidebar-ring: #c3c0ff;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
   }
-}
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  body {
+    @apply bg-background text-foreground;
+  }
+
+  html {
+    @apply font-sans;
+  }
 }
