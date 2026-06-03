@@ -24,13 +24,21 @@ export function AuthHeader() {
         <SignedIn>
           <Link
             href="/user"
+<<<<<<< HEAD
             className="hidden rounded-lg px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-900"
+=======
+            className="rounded-lg px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-900"
+>>>>>>> 3613ac8137b3fb5500fa2928c6336a8c6dea6e7e
           >
             User
           </Link>
           <Link
             href="/admin"
+<<<<<<< HEAD
             className="hidden rounded-lg px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-900"
+=======
+            className="rounded-lg px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-900"
+>>>>>>> 3613ac8137b3fb5500fa2928c6336a8c6dea6e7e
           >
             Admin
           </Link>
@@ -57,14 +65,21 @@ export function AuthHeader() {
           <SignOutButton>
             <button
               type="button"
+<<<<<<< HEAD
               className="hidden rounded-lg px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-900"
+=======
+              className="rounded-lg px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-900"
+>>>>>>> 3613ac8137b3fb5500fa2928c6336a8c6dea6e7e
             >
               Sign out
             </button>
           </SignOutButton>
+<<<<<<< HEAD
           <Button className="rounded-lg bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:text-slate-50 dark:hover:bg-slate-700">
             $1500
           </Button>
+=======
+>>>>>>> 3613ac8137b3fb5500fa2928c6336a8c6dea6e7e
           <UserButton />
         </SignedIn>
       </div>

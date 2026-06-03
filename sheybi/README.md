@@ -18,7 +18,11 @@ python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -r sheybi/backend/requirements.txt
 python3 -m backend.app
+<<<<<<< HEAD
 ```c
+=======
+```
+>>>>>>> 3613ac8137b3fb5500fa2928c6336a8c6dea6e7e
 
 By default the backend uses SQLite at `sheybi/backend/app.sqlite3`.
 
