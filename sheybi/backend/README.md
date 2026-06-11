@@ -1,18 +1,9 @@
-# Backend (Flask API)
+# Backend
 
-Auth has been intentionally removed for now. This backend currently exposes only:
-
-added auth.p and all api routes are guided with auth.py
-
-current Flask storage: markets: dict[str, Market] = {}
- we would have to checge this to use instantdb 
-
-So eventually you’ll replace it to: markets[market_id] = Market(...)
-create market in InstantDB
-fetch market from InstantDB
-persist trades there
+Flask API that now persists app data in InstantDB instead of SQLite.
 
 ## Install
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -20,38 +11,71 @@ python3 -m pip install -r sheybi/backend/requirements.txt
 ```
 
 ## Run
-`python3 -m backend.app`
 
-## SQLite
-By default the backend stores data in `sheybi/backend/app.sqlite3`.
+```bash
+python3 -m backend.app
+```
 
-Override with:
-- `SHEYBI_SQLITE_PATH=/absolute/or/relative/path.sqlite3`
+## Required env
+
+Set these in `backend/.env` or your shell:
+
+- `INSTANT_APP_ID`
+- `INSTANT_ADMIN_TOKEN`
 
 ## Auth env
+
 The Flask API expects a Clerk session JWT in `Authorization: Bearer <token>`.
 
 Set at least one of:
-- `CLERK_ISSUER` (recommended): used to build the JWKS URL at `/.well-known/jwks.json`
-- `CLERK_JWKS_URL`: override if your issuer doesn't expose JWKS at the well-known path
+
+- `CLERK_ISSUER` or
+- `CLERK_JWKS_URL`
 
 Optional:
-- `CLERK_AUDIENCE`: if you use an audience template for your backend tokens
 
-## Dev auth (bypass Clerk)
+- `CLERK_AUDIENCE`
+
+## Dev auth
+
 For local testing only, you can bypass Clerk verification:
-- set `DEV_AUTH=1`
-- send `X-Dev-User-Id: dev_alice` (and optionally `X-Dev-User-Name: Alice`)
 
-Never enable this in production.
+- `DEV_AUTH=1`
+- `X-Dev-User-Id: dev_alice`
+- `X-Dev-User-Name: Alice` optional
 
-### Load test
-To simulate 100–1000 users quickly without the UI:
-- start the backend with `DEV_AUTH=1` and `ADMIN_USER_IDS=dev_admin`
-- run `python3 sheybi/load_test_market.py --users 1000 --ops-per-user 10 --threads 100`
+Never enable dev auth in production.
 
+## Simulation
 
-oi installed cors flask cause i was getiting cros browswer issue 
-installed pip install python-dotenv
+You can run a synthetic market test that creates a `tester` market, generates synthetic users, and writes a JSONL log:
 
-basiclly i think i am done with adding auth, rub npm run dev for the froneend, and also run phyton app.py for the backend and we are golden then. so continue from stone xoxo
+```bash
+python3 -m backend.simulate_market --trades 300 --users 1000 --log-file backend/logs/tester_simulation.jsonl
+```
+
+Batch runs with a single merged CSV audit:
+
+```bash
+python3 -m backend.simulate_market --runs 5 --seed-start 100 --trades-min 100 --trades-max 1000 --mode adversarial --csv backend/logs/tester_audit.csv
+```
+
+The merged audit CSV includes one row per summary, trade, and resolution event. It contains:
+
+- summary rows for each run
+- trade rows with ask/bid/executed price, fee, wallet, and reserve movement
+- resolution rows with gross resolve price, net resolve price, payout, and user P/L
+
+The simulator logs:
+
+- every accepted trade
+- every rejected trade
+- market risk/cap snapshots after each trade
+- scenario summaries for each possible winning option
+- a final platform/user P/L summary
+- batch summaries across seeds when `--runs` is greater than 1
+
+The simulator expects the same Instant env vars as the backend:
+
+- `INSTANT_APP_ID`
+- `INSTANT_ADMIN_TOKEN`

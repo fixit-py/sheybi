@@ -22,12 +22,13 @@ function Item({ href, label }: { href: string; label: string }) {
 
 export default function UserSettingsBar() {
   return (
-    <nav className="flex flex-wrap items-center gap-2 rounded-2xl border border-zinc-200 bg-white p-2 shadow-sm dark:border-zinc-800 dark:bg-black">
-      <Item href="/user" label="Trade" />
+    <nav className="hidden flex-wrap items-center gap-2 rounded-2xl border border-zinc-200 bg-white p-2 shadow-sm dark:border-zinc-800 dark:bg-black md:flex">
+      <Item href="/" label="Trade" />
       <Item href="/user/portfolio" label="Portfolio" />
+      <Item href="/user/history" label="History" />
       <Item href="/user/wallet" label="Wallet" />
+      <Item href="/user/verification" label="Verification" />
       <Item href="/user/settings" label="Settings" />
     </nav>
   );
 }
-

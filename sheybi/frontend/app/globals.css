@@ -97,6 +97,9 @@
 }
 
 :root {
+  --font-sans: ui-sans-serif, system-ui, sans-serif;
+  --font-geist-mono: ui-monospace, SFMono-Regular, monospace;
+
   /* Sheybi Light Theme configuration */
   --background: #f7f8fc;
   --foreground: #1b1b24;

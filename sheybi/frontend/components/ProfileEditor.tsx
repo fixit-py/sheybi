@@ -1,7 +1,10 @@
 "use client";
+/* eslint-disable react-hooks/set-state-in-effect */
 
-import { useEffect, useState } from "react";
-import { useAuth } from "@clerk/nextjs";
+import { useCallback, useEffect, useState } from "react";
+import { useAuth, useUser } from "@clerk/nextjs";
+
+import { db, hasInstantConfig } from "@/lib/instant";
 
 type Profile = {
   user_id: string;
@@ -14,6 +17,18 @@ type Profile = {
   updated_at?: string | null;
 };
 
+type InstantProfile = {
+  id: string;
+  userId?: string | null;
+  display_name?: string | null;
+  handle?: string | null;
+  bio?: string | null;
+  avatar_url?: string | null;
+  verified?: boolean | null;
+  createdAt?: number | string | null;
+  updatedAt?: number | string | null;
+};
+
 async function readJson(res: Response) {
   const text = await res.text();
   try {
@@ -23,8 +38,99 @@ async function readJson(res: Response) {
   }
 }
 
+function InstantProfileBridge({
+  userId,
+  onProfile,
+  onForm,
+}: {
+  userId: string | null | undefined;
+  onProfile: (profile: Profile | null) => void;
+  onForm: (form: {
+    display_name: string;
+    handle: string;
+    bio: string;
+    avatar_url: string;
+  }) => void;
+}) {
+  if (!hasInstantConfig || !db || !userId) return null;
+
+  return (
+    <InstantProfileBridgeInner
+      userId={userId}
+      onProfile={onProfile}
+      onForm={onForm}
+    />
+  );
+}
+
+function InstantProfileBridgeInner({
+  userId,
+  onProfile,
+  onForm,
+}: {
+  userId: string;
+  onProfile: (profile: Profile | null) => void;
+  onForm: (form: {
+    display_name: string;
+    handle: string;
+    bio: string;
+    avatar_url: string;
+  }) => void;
+}) {
+  const instantDb = db as NonNullable<typeof db>;
+
+  const profileQuery = instantDb.useQuery({
+    profiles: {
+      $: {
+        where: {
+          userId,
+        },
+      },
+    },
+  });
+
+  useEffect(() => {
+    const rows = (profileQuery.data?.profiles ?? []) as InstantProfile[];
+    const next = rows[0] ?? null;
+    if (!next) {
+      onProfile(null);
+      return;
+    }
+    const profile: Profile = {
+      user_id: next.userId ?? userId,
+      display_name: next.display_name ?? null,
+      handle: next.handle ?? null,
+      bio: next.bio ?? null,
+      avatar_url: next.avatar_url ?? null,
+      verified: !!next.verified,
+      created_at:
+        typeof next.createdAt === "number"
+          ? new Date(next.createdAt).toISOString()
+          : typeof next.createdAt === "string"
+            ? next.createdAt
+            : null,
+      updated_at:
+        typeof next.updatedAt === "number"
+          ? new Date(next.updatedAt).toISOString()
+          : typeof next.updatedAt === "string"
+            ? next.updatedAt
+            : null,
+    };
+    onProfile(profile);
+    onForm({
+      display_name: profile.display_name ?? "",
+      handle: profile.handle ?? "",
+      bio: profile.bio ?? "",
+      avatar_url: profile.avatar_url ?? "",
+    });
+  }, [onForm, onProfile, profileQuery.data, userId]);
+
+  return null;
+}
+
 export default function ProfileEditor() {
   const { getToken } = useAuth();
+  const { user } = useUser();
   const [profile, setProfile] = useState<Profile | null>(null);
   const [form, setForm] = useState({
     display_name: "",
@@ -36,7 +142,7 @@ export default function ProfileEditor() {
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setBusy(true);
     setError(null);
     setSaved(false);
@@ -59,7 +165,7 @@ export default function ProfileEditor() {
     } finally {
       setBusy(false);
     }
-  };
+  }, [getToken]);
 
   const save = async () => {
     setBusy(true);
@@ -87,8 +193,10 @@ export default function ProfileEditor() {
   };
 
   useEffect(() => {
-    void load();
-  }, []);
+    if (!hasInstantConfig || !db) {
+      void load();
+    }
+  }, [load]);
 
   return (
     <section className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-black">
@@ -98,18 +206,26 @@ export default function ProfileEditor() {
             Profile
           </div>
           <div className="text-xs text-zinc-500 dark:text-zinc-400">
-            Stored in SQLite (separate from Clerk).
+            Read live from Instant. Writes still go through Flask.
           </div>
         </div>
-        <button
-          type="button"
-          onClick={load}
-          disabled={busy}
-          className="rounded-lg border border-zinc-200 px-3 py-2 text-sm font-medium text-zinc-800 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-900"
-        >
-          Refresh
-        </button>
+        {hasInstantConfig && db ? null : (
+          <button
+            type="button"
+            onClick={load}
+            disabled={busy}
+            className="rounded-lg border border-zinc-200 px-3 py-2 text-sm font-medium text-zinc-800 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-900"
+          >
+            Refresh
+          </button>
+        )}
       </div>
+
+      <InstantProfileBridge
+        userId={user?.id}
+        onProfile={setProfile}
+        onForm={setForm}
+      />
 
       {error ? (
         <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200">
@@ -125,7 +241,7 @@ export default function ProfileEditor() {
 
       <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
         <label className="grid gap-1 text-sm text-zinc-700 dark:text-zinc-300">
-          Display name
+          Name
           <input
             value={form.display_name}
             onChange={(e) =>
@@ -137,7 +253,7 @@ export default function ProfileEditor() {
         </label>
 
         <label className="grid gap-1 text-sm text-zinc-700 dark:text-zinc-300">
-          Handle
+          User tag
           <input
             value={form.handle}
             onChange={(e) => setForm((s) => ({ ...s, handle: e.target.value }))}
@@ -188,4 +304,3 @@ export default function ProfileEditor() {
     </section>
   );
 }
-

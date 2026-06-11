@@ -1,17 +1,12 @@
-import UserSettingsBar from "@/components/UserSettingsBar";
+import WalletPanel from "@/components/WalletPanel";
 
 export default function WalletPage() {
   return (
-    <main className="flex w-full max-w-5xl flex-1 flex-col gap-6 px-6 py-10">
-      <h1 className="text-3xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
+    <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-4 px-4 py-5 sm:px-6 lg:px-8">
+      <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50 sm:text-3xl">
         Wallet
       </h1>
-      <UserSettingsBar />
-      <section className="rounded-2xl border border-zinc-200 bg-white p-6 text-sm text-zinc-700 shadow-sm dark:border-zinc-800 dark:bg-black dark:text-zinc-300">
-        Wallet is not implemented yet (no deposits/withdrawals ledger). Next step
-        is to add a `wallet_ledger` table and compute balance from it.
-      </section>
+      <WalletPanel />
     </main>
   );
 }
-

@@ -1,7 +1,10 @@
 "use client";
+/* eslint-disable react-hooks/set-state-in-effect */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth, useUser } from "@clerk/nextjs";
+
+import { db, hasInstantConfig } from "@/lib/instant";
 
 type MarketSummary = {
   id: string;
@@ -10,8 +13,6 @@ type MarketSummary = {
   start: string;
   close: string;
 };
-
-type MarketListResponse = { markets: MarketSummary[] };
 
 type MarketState = {
   chance_yes: number;
@@ -36,7 +37,7 @@ type MarketDetailResponse = {
 };
 
 type OrderbookEvent = {
-  id: number;
+  id: string | number;
   type: "BUY" | "SELL" | "RESOLVE";
   side: "YES" | "NO" | null;
   amount: number | null;
@@ -51,6 +52,29 @@ type OrderbookResponse = {
   market_id: string;
   unique_users: number;
   events: OrderbookEvent[];
+};
+
+type InstantMarket = {
+  id: string;
+  title?: string | null;
+  rules?: string | null;
+  start?: string | null;
+  close?: string | null;
+  createdAt?: number | string | null;
+};
+
+type InstantEvent = {
+  id: string;
+  marketId?: string | null;
+  userId?: string | null;
+  displayName?: string | null;
+  type?: "BUY" | "SELL" | "RESOLVE" | string | null;
+  side?: "YES" | "NO" | string | null;
+  amount?: number | string | null;
+  shares?: number | string | null;
+  outcome?: "YES" | "NO" | string | null;
+  t?: string | null;
+  createdAt?: number | string | null;
 };
 
 function formatIso(iso: string) {
@@ -68,6 +92,15 @@ function toIso(value: string) {
   return dt.toISOString();
 }
 
+function toNumber(value: unknown) {
+  if (typeof value === "number") return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
 async function readJson(res: Response) {
   const text = await res.text();
   try {
@@ -75,6 +108,117 @@ async function readJson(res: Response) {
   } catch {
     return { error: "invalid_json", raw: text };
   }
+}
+
+function InstantReadBridge({
+  selectedMarketId,
+  onMarkets,
+  onSelectedMarketId,
+  onOrderbook,
+}: {
+  selectedMarketId: string;
+  onMarkets: (markets: MarketSummary[]) => void;
+  onSelectedMarketId: (marketId: string) => void;
+  onOrderbook: (orderbook: OrderbookResponse | null) => void;
+}) {
+  if (!hasInstantConfig || !db) return null;
+
+  return (
+    <InstantReadBridgeInner
+      selectedMarketId={selectedMarketId}
+      onMarkets={onMarkets}
+      onSelectedMarketId={onSelectedMarketId}
+      onOrderbook={onOrderbook}
+    />
+  );
+}
+
+function InstantReadBridgeInner({
+  selectedMarketId,
+  onMarkets,
+  onSelectedMarketId,
+  onOrderbook,
+}: {
+  selectedMarketId: string;
+  onMarkets: (markets: MarketSummary[]) => void;
+  onSelectedMarketId: (marketId: string) => void;
+  onOrderbook: (orderbook: OrderbookResponse | null) => void;
+}) {
+  const instantDb = db as NonNullable<typeof db>;
+
+  const marketsQuery = instantDb.useQuery({
+    markets: {
+      $: {
+        order: {
+          createdAt: "desc",
+        },
+      },
+    },
+  });
+
+  const eventsQuery = instantDb.useQuery(
+    selectedMarketId
+      ? {
+          market_events: {
+            $: {
+              where: {
+                marketId: selectedMarketId,
+              },
+              order: {
+                createdAt: "desc",
+              },
+            },
+          },
+        }
+      : null,
+  );
+
+  useEffect(() => {
+    const rows = (marketsQuery.data?.markets ?? []) as InstantMarket[];
+    if (!rows.length) {
+      onMarkets([]);
+      return;
+    }
+    const nextMarkets = rows.map((m) => ({
+      id: m.id,
+      title: m.title ?? null,
+      rules: m.rules ?? null,
+      start: m.start ?? "",
+      close: m.close ?? "",
+    }));
+    onMarkets(nextMarkets);
+    if (!selectedMarketId && nextMarkets[0]) {
+      onSelectedMarketId(nextMarkets[0].id);
+    }
+  }, [marketsQuery.data, onMarkets, onSelectedMarketId, selectedMarketId]);
+
+  useEffect(() => {
+    if (!selectedMarketId) {
+      onOrderbook(null);
+      return;
+    }
+    const rows = (eventsQuery.data?.market_events ?? []) as InstantEvent[];
+    const mapped: OrderbookEvent[] = rows.map((e, index) => ({
+      id: e.id || index,
+      type: (e.type as OrderbookEvent["type"]) ?? "BUY",
+      side:
+        e.side === "YES" || e.side === "NO" ? e.side : null,
+      amount: e.amount == null ? null : toNumber(e.amount),
+      shares: e.shares == null ? null : toNumber(e.shares),
+      outcome:
+        e.outcome === "YES" || e.outcome === "NO" ? e.outcome : null,
+      t: e.t ?? "",
+      user_id: e.userId ?? null,
+      display_name: e.displayName ?? null,
+    }));
+    onOrderbook({
+      market_id: selectedMarketId,
+      unique_users: new Set(mapped.map((e) => e.user_id).filter(Boolean)).size,
+      events: mapped,
+    });
+  }, [eventsQuery.data, onOrderbook, selectedMarketId]);
+
+  return null;
 }
 
 type Mode = "admin" | "user";
@@ -108,12 +252,8 @@ export default function MarketDemo({ mode }: { mode: Mode }) {
   const [background, setBackground] = useState<string | null>(null);
   const [lastResponse, setLastResponse] = useState<unknown>(null);
   const [lastError, setLastError] = useState<string | null>(null);
-  const pollingRef = useRef<number | null>(null);
-  const marketsPollRef = useRef<number | null>(null);
   const inFlightRef = useRef({
-    markets: false,
     detail: false,
-    orderbook: false,
   });
 
   const getAuthHeaders = useCallback(async () => {
@@ -136,57 +276,9 @@ export default function MarketDemo({ mode }: { mode: Mode }) {
     return headers;
   }, [getToken, appDisplayName, user, devUserId, devUserName]);
 
-  const loadMe = useCallback(async () => {
-    try {
-      const token = await getToken();
-      const res = await fetch("/api/flask/me", {
-        headers: { Authorization: token ? `Bearer ${token}` : "" },
-      });
-      const json = await readJson(res);
-      if (res.ok && json && typeof json === "object" && "display_name" in json) {
-        const dn = (json as { display_name?: unknown }).display_name;
-        setAppDisplayName(typeof dn === "string" ? dn : "");
-      }
-    } catch {
-      // ignore
-    }
-  }, [getToken]);
-
-  const refreshMarkets = useCallback(
-    async ({ background }: { background: boolean }) => {
-      if (inFlightRef.current.markets) return;
-      inFlightRef.current.markets = true;
-      if (background) setBackground("syncing markets");
-      else {
-        setBusy("loading markets");
-        setLastError(null);
-      }
-    try {
-      const headers = await getAuthHeaders();
-      const res = await fetch("/api/flask/markets", { headers });
-      const json = (await readJson(res)) as MarketListResponse;
-      if (!res.ok) {
-        throw new Error(
-          typeof json === "object" && json && "error" in json
-            ? String((json as { error: unknown }).error)
-            : `HTTP ${res.status}`,
-        );
-      }
-      const nextMarkets = Array.isArray(json.markets) ? json.markets : [];
-      setMarkets(nextMarkets);
-      if (!selectedMarketId && nextMarkets.length > 0) {
-        setSelectedMarketId(nextMarkets[0].id);
-      }
-    } catch (e) {
-      if (!background) setLastError(e instanceof Error ? e.message : String(e));
-    } finally {
-      inFlightRef.current.markets = false;
-      if (background) setBackground(null);
-      else setBusy(null);
-    }
-    },
-    [getAuthHeaders, selectedMarketId],
-  );
+  const setMarketsFromInstant = useCallback((nextMarkets: MarketSummary[]) => {
+    setMarkets(nextMarkets);
+  }, []);
 
   const refreshMarketDetail = useCallback(
     async (marketId: string, opts?: { background?: boolean }) => {
@@ -223,93 +315,20 @@ export default function MarketDemo({ mode }: { mode: Mode }) {
     [getAuthHeaders],
   );
 
-  const refreshOrderbook = useCallback(
-    async (marketId: string, opts?: { background?: boolean }) => {
-      if (!marketId) return;
-      if (inFlightRef.current.orderbook) return;
-      inFlightRef.current.orderbook = true;
-      const background = !!opts?.background;
-      if (background) setBackground("syncing orderbook");
-      else {
-        setBusy("loading orderbook");
-        setLastError(null);
-      }
-      try {
-        const headers = await getAuthHeaders();
-        const res = await fetch(`/api/flask/markets/${marketId}/orderbook`, {
-          headers,
-        });
-        const json = (await readJson(res)) as OrderbookResponse;
-        setLastResponse(json);
-        if (!res.ok) {
-          throw new Error(
-            typeof json === "object" && json && "error" in json
-              ? String((json as { error: unknown }).error)
-              : `HTTP ${res.status}`,
-          );
-        }
-        setOrderbook(json);
-      } catch (e) {
-        if (!background) setLastError(e instanceof Error ? e.message : String(e));
-      } finally {
-        inFlightRef.current.orderbook = false;
-        if (background) setBackground(null);
-        else setBusy(null);
-      }
-    },
-    [getAuthHeaders],
-  );
-
   useEffect(() => {
-    void loadMe();
-    void refreshMarkets({ background: false });
-  }, [loadMe, refreshMarkets]);
-
-  useEffect(() => {
-    if (!selectedMarketId) {
-      setMarketDetail(null);
-      setOrderbook(null);
-      return;
+    if (user) {
+      setAppDisplayName(
+        user.fullName ??
+          user.firstName ??
+          user.primaryEmailAddress?.emailAddress ??
+          "",
+      );
     }
+  }, [user]);
+
+  useEffect(() => {
     void refreshMarketDetail(selectedMarketId, { background: false });
-    void refreshOrderbook(selectedMarketId, { background: false });
-  }, [selectedMarketId, refreshMarketDetail, refreshOrderbook]);
-
-  // Auto-poll market state + orderbook for "high frequency" feel.
-  useEffect(() => {
-    if (pollingRef.current) {
-      window.clearInterval(pollingRef.current);
-      pollingRef.current = null;
-    }
-    if (!selectedMarketId) return;
-
-    pollingRef.current = window.setInterval(() => {
-      void refreshMarketDetail(selectedMarketId, { background: true });
-      void refreshOrderbook(selectedMarketId, { background: true });
-    }, 750);
-
-    return () => {
-      if (pollingRef.current) {
-        window.clearInterval(pollingRef.current);
-        pollingRef.current = null;
-      }
-    };
-  }, [selectedMarketId, refreshMarketDetail, refreshOrderbook]);
-
-  // Auto-refresh markets list so new markets appear without reload.
-  useEffect(() => {
-    if (marketsPollRef.current) {
-      window.clearInterval(marketsPollRef.current);
-      marketsPollRef.current = null;
-    }
-    marketsPollRef.current = window.setInterval(() => {
-      void refreshMarkets({ background: true });
-    }, 2000);
-    return () => {
-      if (marketsPollRef.current) window.clearInterval(marketsPollRef.current);
-      marketsPollRef.current = null;
-    };
-  }, [refreshMarkets]);
+  }, [selectedMarketId, refreshMarketDetail]);
 
   const createMarket = async () => {
     if (mode !== "admin") return;
@@ -327,7 +346,9 @@ export default function MarketDemo({ mode }: { mode: Mode }) {
       const json = await readJson(res);
       setLastResponse(json);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      await refreshMarkets({ background: false });
+      if (selectedMarketId) {
+        await refreshMarketDetail(selectedMarketId);
+      }
     } catch (e) {
       setLastError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -423,6 +444,12 @@ export default function MarketDemo({ mode }: { mode: Mode }) {
       </div>
 
       <div className="mt-6 grid grid-cols-1 gap-6 sm:grid-cols-2">
+        <InstantReadBridge
+          selectedMarketId={selectedMarketId}
+          onMarkets={setMarketsFromInstant}
+          onSelectedMarketId={setSelectedMarketId}
+          onOrderbook={setOrderbook}
+        />
         <div className="flex flex-col gap-3">
           <div className="rounded-xl border border-zinc-200 p-4 dark:border-zinc-800">
             <div className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-50">

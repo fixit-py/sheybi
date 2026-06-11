@@ -1,36 +1,27 @@
-import Link from "next/link";
-import { auth, currentUser } from "@clerk/nextjs/server";
+import { redirect } from "next/navigation";
+import { auth } from "@clerk/nextjs/server";
 
-import MarketDemo from "@/components/MarketDemo";
+import ProfileEditor from "@/components/ProfileEditor";
+import UserGreeting from "@/components/UserGreeting";
 import UserSettingsBar from "@/components/UserSettingsBar";
 
 export default async function UserPage() {
   const { userId } = await auth();
-  const user = userId ? await currentUser() : null;
+  if (!userId) redirect("/sign-in");
 
   return (
-    <main className="flex w-full max-w-5xl flex-1 flex-col gap-8 px-6 py-10">
-      <header className="flex flex-col gap-2">
-        <h1 className="text-3xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
-          User
-        </h1>
+    <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-6 px-4 py-5 sm:px-6 lg:px-8">
+      <header className="flex flex-col gap-2 rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-black">
+        <UserGreeting />
         <p className="max-w-2xl text-base leading-7 text-zinc-600 dark:text-zinc-400">
-          {user
-            ? `Signed in as ${user.firstName ?? ""} ${user.lastName ?? ""}`.trim()
-            : "Sign in to use the app."}
+          Manage your profile, verification, and trading views.
         </p>
-        <div className="text-sm">
-          <Link
-            href="/admin"
-            className="font-medium text-zinc-950 underline decoration-zinc-300 underline-offset-4 dark:text-zinc-50 dark:decoration-zinc-700"
-          >
-            Go to admin
-          </Link>
-        </div>
       </header>
 
-      <UserSettingsBar className={"hidden"} />
-      <MarketDemo mode="user" />
+      <UserSettingsBar />
+      <div className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-black sm:p-6">
+        <ProfileEditor />
+      </div>
     </main>
   );
 }

@@ -3,37 +3,77 @@
 import * as React from "react"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { useUser } from "@clerk/nextjs"
+import { useAuth, useUser } from "@clerk/nextjs"
 import {
   Sidebar,
   SidebarContent,
-  SidebarFooter,
   SidebarHeader,
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
-  useSidebar,
 } from "@/components/ui/sidebar"
-import { NavUser } from "@/components/nav-user"
 import {
   HomeIcon,
   TrendingUpIcon,
-  LightbulbIcon,
-  UserIcon,
-  PlusIcon,
+  WalletIcon,
   Settings2Icon,
   CircleHelpIcon,
-  FlameIcon
+  FlameIcon,
+  BadgeCheckIcon,
 } from "lucide-react"
 
-interface AppSidebarProps extends React.ComponentProps<typeof Sidebar> {
-  isAdmin?: boolean
+type ProfileResponse = {
+  wallet_balance?: number;
+  currency?: string;
+  display_name?: string | null;
+  handle?: string | null;
+};
+
+async function readJson(res: Response) {
+  const text = await res.text();
+  try {
+    return text ? JSON.parse(text) : null;
+  } catch {
+    return { error: "invalid_json", raw: text };
+  }
 }
 
-export function AppSidebar({ isAdmin = false, ...props }: AppSidebarProps) {
+export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   const pathname = usePathname()
+  const { getToken } = useAuth()
   const { user, isLoaded } = useUser()
-  const { toggleSidebar } = useSidebar()
+  const [profile, setProfile] = React.useState<ProfileResponse | null>(null)
+
+  React.useEffect(() => {
+    if (!isLoaded || !user) return
+    let active = true
+
+    const loadProfile = async () => {
+      try {
+        const token = await getToken()
+        const res = await fetch("/api/flask/me", {
+          headers: {
+            Authorization: token ? `Bearer ${token}` : "",
+          },
+        })
+        const json = (await readJson(res)) as ProfileResponse
+        if (!res.ok || !active) return
+        setProfile(json)
+      } catch {
+        if (!active) return
+        setProfile(null)
+      }
+    }
+
+    void loadProfile()
+    const timer = window.setInterval(() => {
+      void loadProfile()
+    }, 30000)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [getToken, isLoaded, user])
 
   // Format Clerk user for the NavUser footer
   const userData = React.useMemo(() => {
@@ -42,14 +82,25 @@ export function AppSidebar({ isAdmin = false, ...props }: AppSidebarProps) {
         name: "Loading...",
         email: "please wait",
         avatar: "",
+        handle: "",
+        wallet: "Wallet",
       }
     }
+    const walletBalance = Number(profile?.wallet_balance ?? 0)
     return {
-      name: user.fullName || user.firstName || "User",
+      name: profile?.display_name || user.fullName || user.firstName || "User",
+      handle: profile?.handle || "",
       email: user.primaryEmailAddress?.emailAddress || "",
       avatar: user.imageUrl,
+      wallet: Number.isFinite(walletBalance)
+        ? new Intl.NumberFormat("en-NG", {
+            style: "currency",
+            currency: profile?.currency || "NGN",
+            maximumFractionDigits: 2,
+          }).format(walletBalance)
+        : "Wallet",
     }
-  }, [user, isLoaded])
+  }, [profile, user, isLoaded])
 
   // Navigation items matching the desktop layout mockup
   const navigationItems = [
@@ -59,44 +110,73 @@ export function AppSidebar({ isAdmin = false, ...props }: AppSidebarProps) {
       icon: HomeIcon,
     },
     {
-      title: "Trades",
+      title: "Portfolio",
       url: "/user/portfolio",
       icon: TrendingUpIcon,
     },
     {
-      title: "Suggest",
-      url: "/user/suggest",
-      icon: LightbulbIcon,
+      title: "History",
+      url: "/user/history",
+      icon: CircleHelpIcon,
     },
     {
-      title: "Profile",
-      url: "/user",
-      icon: UserIcon,
+      title: "Wallet",
+      url: "/user/wallet",
+      icon: WalletIcon,
+    },
+    {
+      title: "Verification",
+      url: "/user/verification",
+      icon: BadgeCheckIcon,
+    },
+    {
+      title: "Settings",
+      url: "/user/settings",
+      icon: Settings2Icon,
     },
   ]
 
   return (
     <Sidebar collapsible="offcanvas" {...props}>
       <SidebarHeader className=" border-b border-zinc-200/50 p-4 dark:border-zinc-800/50">
-        <SidebarMenu>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              size="lg"
-              className="hover:bg-transparent active:bg-transparent"
-              render={<Link href="/user" />}
-            >
-              <div className="flex items-center gap-3">
-                <div className="flex size-9 items-center justify-center rounded-xl bg-[#4F46E5] text-white shadow-sm">
-                  <FlameIcon className="size-5 fill-white" />
+        <div className="flex flex-col gap-3">
+          <SidebarMenu>
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                size="lg"
+                className="hover:bg-transparent active:bg-transparent"
+                render={<Link href="/" />}
+              >
+                <div className="flex items-center gap-3">
+                  <div className="flex size-9 items-center justify-center rounded-xl bg-[#4F46E5] text-white shadow-sm">
+                    <FlameIcon className="size-5 fill-white" />
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="text-base font-bold tracking-tight text-zinc-950 dark:text-zinc-50">Sheybi</span>
+                    <span className="text-xs text-zinc-500 font-medium">Prediction Market</span>
+                  </div>
                 </div>
-                <div className="flex flex-col">
-                  <span className="text-base font-bold tracking-tight text-zinc-950 dark:text-zinc-50">Sheybi</span>
-                  <span className="text-xs text-zinc-500 font-medium">Prediction Market</span>
-                </div>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </SidebarMenu>
+
+          <Link
+            href="/user/wallet"
+            className="flex items-center justify-between rounded-2xl border border-zinc-200/70 bg-zinc-50 px-4 py-3 text-left transition-colors hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-950 dark:hover:bg-zinc-900"
+          >
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+                {userData.handle ? `@${userData.handle}` : userData.name}
               </div>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        </SidebarMenu>
+              <div className="truncate text-xs text-zinc-500 dark:text-zinc-400">
+                Wallet
+              </div>
+            </div>
+            <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+              {userData.wallet}
+            </div>
+          </Link>
+        </div>
       </SidebarHeader>
 
       <SidebarContent className="px-3 py-4 gap-4">
@@ -125,34 +205,6 @@ export function AppSidebar({ isAdmin = false, ...props }: AppSidebarProps) {
         </SidebarMenu>
       </SidebarContent>
 
-      <SidebarFooter className="border-t border-zinc-200/50 p-4 gap-4 dark:border-zinc-800/50">
-        {/* Render Create Market button ONLY if the user is an admin */}
-        {isAdmin && (
-          <Link
-            href="/admin"
-            className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#4F46E5] text-sm font-semibold text-white shadow-sm transition-all hover:bg-[#4338CA] active:scale-[0.98]"
-          >
-            <PlusIcon className="size-4" />
-            <span>Create Market</span>
-          </Link>
-        )}
-
-        {/* Secondary options */}
-        <div className="flex flex-col gap-1">
-          <Link
-            href="/support"
-            className="flex items-center gap-3 px-3 py-2 text-sm font-medium text-zinc-600 rounded-xl hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-50 transition-colors"
-          >
-            <CircleHelpIcon className="size-4 text-zinc-500" />
-            <span>Support</span>
-          </Link>
-        </div>
-
-        {/* Clerk User dropdown */}
-        <div className="pt-2 border-t border-zinc-100 dark:border-zinc-800">
-          <NavUser user={userData} />
-        </div>
-      </SidebarFooter>
     </Sidebar>
   )
 }
