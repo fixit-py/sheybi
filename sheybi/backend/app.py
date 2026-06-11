@@ -2438,4 +2438,10 @@ def create_app() -> Flask:
 
 if __name__ == "__main__":
     app = create_app()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")), debug=True)
+    debug_enabled = os.getenv("FLASK_DEBUG", "").strip() in ("1", "true", "TRUE", "yes", "YES")
+    app.run(
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", "5000")),
+        debug=debug_enabled,
+        use_reloader=debug_enabled,
+    )

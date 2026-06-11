@@ -1,4 +1,5 @@
 import os
+import json
 from functools import wraps
 
 import jwt
@@ -17,6 +18,18 @@ def _get_token():
         return auth[7:].strip()
 
     return None
+
+
+def _decode_unverified_claims(token: str) -> dict:
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return {}
+        payload = jwt.utils.base64url_decode(parts[1].encode("utf-8"))
+        decoded = json.loads(payload.decode("utf-8"))
+        return decoded if isinstance(decoded, dict) else {}
+    except Exception:
+        return {}
 
 
 def require_auth(f):
@@ -41,7 +54,7 @@ def require_auth(f):
             # Configure either:
             # - CLERK_ISSUER (recommended), optionally CLERK_JWKS_URL and CLERK_AUDIENCE
             # - or CLERK_JWKS_URL directly
-            unverified = jwt.decode(token, options={"verify_signature": False})
+            unverified = _decode_unverified_claims(token)
 
             issuer_env = os.getenv("CLERK_ISSUER")
             issuer_token = unverified.get("iss")
