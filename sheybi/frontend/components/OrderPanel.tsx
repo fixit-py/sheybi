@@ -157,7 +157,7 @@ export default function OrderPanel({
       if (token) {
         headers.Authorization = `Bearer ${token}`;
       }
-      const meRes = await fetch("/api/flask/me", { headers });
+      const meRes = await fetch("/api/flask/me", { headers, cache: "no-store" });
       const meJson = await readJson(meRes);
       if (!meRes.ok) throw new Error(`wallet HTTP ${meRes.status}`);
       setWallet(meJson as MeResponse);

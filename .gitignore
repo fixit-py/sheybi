@@ -25,3 +25,4 @@ env/
 # Environment variables
 .env
 .env.local
+me.txt

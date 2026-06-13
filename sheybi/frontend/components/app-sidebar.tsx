@@ -52,6 +52,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
       try {
         const token = await getToken()
         const res = await fetch("/api/flask/me", {
+          cache: "no-store",
           headers: {
             Authorization: token ? `Bearer ${token}` : "",
           },
@@ -122,6 +123,11 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
     {
       title: "Wallet",
       url: "/user/wallet",
+      icon: WalletIcon,
+    },
+    {
+      title: "Deposit",
+      url: "/user/deposit",
       icon: WalletIcon,
     },
     {

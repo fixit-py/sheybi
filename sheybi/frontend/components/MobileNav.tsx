@@ -7,6 +7,7 @@ import {
   HomeIcon,
   TrendingUpIcon,
   WalletIcon,
+  CircleDollarSignIcon,
   Settings2Icon,
   CircleHelpIcon,
   BadgeCheckIcon,
@@ -41,6 +42,7 @@ const items = [
   { href: "/user/portfolio", label: "Portfolio", icon: TrendingUpIcon },
   { href: "/user/history", label: "History", icon: CircleHelpIcon },
   { href: "/user/wallet", label: "Wallet", icon: WalletIcon },
+  { href: "/user/deposit", label: "Deposit", icon: CircleDollarSignIcon },
   { href: "/user/verification", label: "Verify", icon: BadgeCheckIcon },
   { href: "/user/settings", label: "Settings", icon: Settings2Icon },
 ] as const;
@@ -58,6 +60,7 @@ export default function MobileNav() {
       try {
         const token = await getToken();
         const res = await fetch("/api/flask/me", {
+          cache: "no-store",
           headers: { Authorization: token ? `Bearer ${token}` : "" },
         });
         const json = (await readJson(res)) as WalletResponse;

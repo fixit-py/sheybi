@@ -27,6 +27,7 @@ export default function UserGreeting() {
       try {
         const token = await getToken();
         const res = await fetch("/api/flask/me", {
+          cache: "no-store",
           headers: { Authorization: token ? `Bearer ${token}` : "" },
         });
         const json = (await readJson(res)) as Profile | { error?: string };

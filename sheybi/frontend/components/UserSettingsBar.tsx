@@ -27,6 +27,8 @@ export default function UserSettingsBar() {
       <Item href="/user/portfolio" label="Portfolio" />
       <Item href="/user/history" label="History" />
       <Item href="/user/wallet" label="Wallet" />
+      <Item href="/user/deposit" label="Deposit" />
+      <Item href="/terms" label="Terms" />
       <Item href="/user/verification" label="Verification" />
       <Item href="/user/settings" label="Settings" />
     </nav>

@@ -9,6 +9,20 @@ type WalletResponse = {
   currency: string;
   display_name?: string | null;
   handle?: string | null;
+  verification_status?: string | null;
+  verification_ready?: boolean | null;
+};
+
+type WithdrawalItem = {
+  id: string;
+  amount: number;
+  status: string | null;
+  bank_name: string | null;
+  account_name: string | null;
+  account_number: string | null;
+  note: string | null;
+  created_at: number | string | null;
+  updated_at: number | string | null;
 };
 
 async function readJson(res: Response) {
@@ -31,22 +45,36 @@ function money(value: number, currency: string) {
 export default function WalletPanel() {
   const { getToken } = useAuth();
   const [data, setData] = useState<WalletResponse | null>(null);
+  const [withdrawals, setWithdrawals] = useState<WithdrawalItem[]>([]);
   const [busy, setBusy] = useState(false);
+  const [submitBusy, setSubmitBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [amount, setAmount] = useState("");
+  const [bankName, setBankName] = useState("");
+  const [accountName, setAccountName] = useState("");
+  const [accountNumber, setAccountNumber] = useState("");
+  const [submitMessage, setSubmitMessage] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setBusy(true);
     setError(null);
     try {
       const token = await getToken();
-      const res = await fetch("/api/flask/me", {
-        headers: {
-          Authorization: token ? `Bearer ${token}` : "",
-        },
-      });
-      const json = (await readJson(res)) as WalletResponse;
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setData(json);
+      const headers = {
+        Authorization: token ? `Bearer ${token}` : "",
+      };
+      const [meRes, withdrawalsRes] = await Promise.all([
+        fetch("/api/flask/me", { headers, cache: "no-store" }),
+        fetch("/api/flask/me/withdrawals", { headers, cache: "no-store" }),
+      ]);
+      const meJson = (await readJson(meRes)) as WalletResponse;
+      const withdrawalsJson = await readJson(withdrawalsRes);
+      if (!meRes.ok) throw new Error((meJson as { error?: string })?.error || `HTTP ${meRes.status}`);
+      if (!withdrawalsRes.ok) {
+        throw new Error((withdrawalsJson as { error?: string })?.error || `HTTP ${withdrawalsRes.status}`);
+      }
+      setData(meJson);
+      setWithdrawals(((withdrawalsJson as { withdrawals?: WithdrawalItem[] })?.withdrawals ?? []) as WithdrawalItem[]);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -61,6 +89,50 @@ export default function WalletPanel() {
     return () => window.clearTimeout(timer);
   }, [load]);
 
+  const submitWithdrawal = async () => {
+    const nextAmount = Number(amount);
+    if (!Number.isFinite(nextAmount) || nextAmount <= 0) {
+      setError("Enter a withdrawal amount.");
+      return;
+    }
+    setSubmitBusy(true);
+    setError(null);
+    setSubmitMessage(null);
+    try {
+      const token = await getToken();
+      const res = await fetch("/api/flask/me/withdrawals", {
+        method: "POST",
+        headers: {
+          Authorization: token ? `Bearer ${token}` : "",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          amount: nextAmount,
+          bank_name: bankName,
+          account_name: accountName,
+          account_number: accountNumber,
+        }),
+      });
+      const json = await readJson(res);
+      if (!res.ok) {
+        throw new Error((json as { error?: string })?.error || `HTTP ${res.status}`);
+      }
+      setSubmitMessage("Withdrawal request submitted.");
+      setAmount("");
+      setBankName("");
+      setAccountName("");
+      setAccountNumber("");
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSubmitBusy(false);
+    }
+  };
+
+  const status = data?.verification_status || "unsubmitted";
+  const canWithdraw = data?.verification_ready || status === "approved";
+
   return (
     <section className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-black">
       <div className="flex items-start justify-between gap-3">
@@ -69,7 +141,7 @@ export default function WalletPanel() {
             Wallet
           </div>
           <div className="text-xs text-zinc-500 dark:text-zinc-400">
-            Dummy balance in NGN
+            
           </div>
         </div>
         <button
@@ -88,25 +160,129 @@ export default function WalletPanel() {
         </div>
       ) : null}
 
-      <div className="mt-6 grid gap-4 sm:grid-cols-2">
-        <div className="rounded-2xl bg-zinc-50 p-5 dark:bg-zinc-900">
-          <div className="text-xs uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
-            Available balance
+      {submitMessage ? (
+        <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-200">
+          {submitMessage}
+        </div>
+      ) : null}
+
+      <div className="mt-6 grid gap-4 lg:grid-cols-[1.05fr_0.95fr]">
+        <div className="space-y-4">
+          <div className="rounded-2xl bg-zinc-50 p-5 dark:bg-zinc-900">
+            <div className="text-xs uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
+              Available balance
+            </div>
+            <div className="mt-2 text-3xl font-semibold text-zinc-900 dark:text-zinc-50">
+              {money(data?.wallet_balance ?? 0, data?.currency ?? "NGN")}
+            </div>
           </div>
-          <div className="mt-2 text-3xl font-semibold text-zinc-900 dark:text-zinc-50">
-            {money(data?.wallet_balance ?? 0, data?.currency ?? "NGN")}
+
+          <div className="rounded-2xl bg-zinc-50 p-5 dark:bg-zinc-900">
+            <div className="text-xs uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
+              Withdrawal gate
+            </div>
+            <div className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">
+              {canWithdraw
+                ? "Withdrawal requests will be queued for review."
+                : "Complete verification in the Verification tab before requesting a withdrawal."}
+            </div>
+            <div className="mt-3 text-xs text-zinc-500 dark:text-zinc-400">
+              Status: {status}
+            </div>
           </div>
         </div>
-        <div className="rounded-2xl bg-zinc-50 p-5 dark:bg-zinc-900">
-          <div className="text-xs uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
-            Account
+
+        <div className="rounded-2xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-black">
+          <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+            Request withdrawal
           </div>
-          <div className="mt-2 text-lg font-semibold text-zinc-900 dark:text-zinc-50">
-            {data?.display_name || data?.handle || data?.user_id || "—"}
+          <div className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+            Name on the bank account must match at least two parts of your profile name.
           </div>
-          <div className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-            Currency: {data?.currency || "NGN"}
+          <div className="mt-4 grid gap-3">
+            <label className="grid gap-1 text-sm text-zinc-700 dark:text-zinc-300">
+              Amount
+              <input
+                inputMode="decimal"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                className="h-11 rounded-xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
+                placeholder="e.g. 5000"
+              />
+            </label>
+            <label className="grid gap-1 text-sm text-zinc-700 dark:text-zinc-300">
+              Bank name
+              <input
+                value={bankName}
+                onChange={(e) => setBankName(e.target.value)}
+                className="h-11 rounded-xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
+                placeholder="e.g. Access Bank"
+              />
+            </label>
+            <label className="grid gap-1 text-sm text-zinc-700 dark:text-zinc-300">
+              Account name
+              <input
+                value={accountName}
+                onChange={(e) => setAccountName(e.target.value)}
+                className="h-11 rounded-xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
+                placeholder="e.g. Folahanmi Adeyemi"
+              />
+            </label>
+            <label className="grid gap-1 text-sm text-zinc-700 dark:text-zinc-300">
+              Account number
+              <input
+                value={accountNumber}
+                onChange={(e) => setAccountNumber(e.target.value)}
+                className="h-11 rounded-xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
+                placeholder="e.g. 0123456789"
+              />
+            </label>
           </div>
+
+          <button
+            type="button"
+            onClick={submitWithdrawal}
+            disabled={submitBusy || !canWithdraw}
+            className="mt-4 inline-flex h-11 items-center justify-center rounded-full bg-zinc-950 px-5 text-sm font-medium text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-200"
+          >
+            {canWithdraw ? "Request withdrawal" : "Verification required"}
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-6">
+        <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+          Withdrawal history
+        </div>
+        <div className="mt-3 overflow-hidden rounded-2xl border border-zinc-200 dark:border-zinc-800">
+          {withdrawals.length ? (
+            <div className="divide-y divide-zinc-200 dark:divide-zinc-800">
+              {withdrawals.map((item) => (
+                <div key={item.id} className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <div className="text-sm font-medium text-zinc-900 dark:text-zinc-50">
+                      {money(item.amount, data?.currency ?? "NGN")} · {item.bank_name || "Bank"}
+                    </div>
+                    <div className="text-xs text-zinc-500 dark:text-zinc-400">
+                      {item.account_name || "—"} · {item.account_number || "—"}
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
+                      {item.status || "pending"}
+                    </div>
+                    <div className="text-xs text-zinc-500 dark:text-zinc-400">
+                      {item.note || "—"}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="px-4 py-6 text-sm text-zinc-500 dark:text-zinc-400">
+              No withdrawals yet.
+            </div>
+          )}
         </div>
       </div>
     </section>

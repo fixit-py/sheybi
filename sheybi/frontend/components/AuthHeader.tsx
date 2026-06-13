@@ -46,6 +46,7 @@ export function AuthHeader() {
       try {
         const token = await getToken();
         const res = await fetch("/api/flask/me", {
+          cache: "no-store",
           headers: {
             Authorization: token ? `Bearer ${token}` : "",
           },

@@ -1,5 +1,4 @@
 "use client";
-/* eslint-disable react-hooks/set-state-in-effect */
 
 import { useCallback, useEffect, useState } from "react";
 import { useAuth, useUser } from "@clerk/nextjs";
@@ -149,6 +148,7 @@ export default function ProfileEditor() {
     try {
       const token = await getToken();
       const res = await fetch("/api/flask/me", {
+          cache: "no-store",
         headers: { Authorization: token ? `Bearer ${token}` : "" },
       });
       const json = (await readJson(res)) as Profile;

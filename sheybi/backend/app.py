@@ -3,20 +3,24 @@ from __future__ import annotations
 import os
 import math
 import sys
+import re
 import uuid
 from threading import Lock
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from dotenv import load_dotenv
-from flask import Flask, g, jsonify, request
+from flask import Flask, g, jsonify, request, send_from_directory
 from flask_cors import CORS
+from werkzeug.utils import secure_filename
 
 load_dotenv()
 
 os.environ.setdefault("DEV_AUTH", "1")
 os.environ.setdefault("ADMIN_USER_IDS", "dev_admin")
 DEFAULT_RESERVE = float(os.getenv("PLATFORM_RESERVE_NGN", "10000000"))
+MAX_VERIFICATION_UPLOAD_BYTES = 5 * 1024 * 1024
+TERMS_VERSION = "2026-06-11-v1"
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -128,28 +132,44 @@ def create_app() -> Flask:
                 "user_id": user_id,
                 "wallet_balance": 100000.0,
                 "currency": "NGN",
-                "kyc_status": "unsubmitted",
-                "kyc_complete": False,
+                "verification_status": "unsubmitted",
+                "verification_ready": False,
+                "terms_accepted": False,
+                "terms_accepted_at": None,
+                "terms_version": None,
             }
-        phone_number = row.get("phone_number") or row.get("phoneNumber")
-        bvn = row.get("bvn")
-        nin = row.get("nin")
-        passport_number = row.get("passport_number") or row.get("passportNumber")
-        kyc_complete = bool(phone_number and (bvn or nin or passport_number))
-        kyc_status = str(row.get("kyc_status") or row.get("kycStatus") or ("verified" if row.get("verified") else ("pending" if kyc_complete else "unsubmitted")))
+        verification = _verification_fields(row)
+        terms_accepted_at = row.get("terms_accepted_at") or row.get("termsAcceptedAt")
+        terms_version = row.get("terms_version") or row.get("termsVersion")
+        legal_name = row.get("display_name")
+        kyc_ready = bool(
+            legal_name
+            and verification["verification_status"] == "approved"
+            and verification["selfie_image_path"]
+            and (
+                verification["age_proof_image_path"]
+                if verification["id_document_type"] == "no_id"
+                else verification["id_document_image_path"]
+            )
+        )
         return {
             "user_id": row.get("userId") or user_id,
             "display_name": row.get("display_name"),
             "handle": row.get("handle"),
             "bio": row.get("bio"),
             "avatar_url": row.get("avatar_url"),
-            "verified": bool(row.get("verified")),
-            "phone_number": phone_number,
-            "bvn": row.get("bvn"),
-            "nin": row.get("nin"),
-            "passport_number": passport_number,
-            "kyc_status": kyc_status,
-            "kyc_complete": kyc_complete,
+            "verified": verification["verification_status"] == "approved" or bool(row.get("verified")),
+            "verification_status": verification["verification_status"],
+            "verification_ready": kyc_ready,
+            "id_document_type": verification["id_document_type"],
+            "id_document_image_path": verification["id_document_image_path"],
+            "age_proof_type": verification["age_proof_type"],
+            "age_proof_image_path": verification["age_proof_image_path"],
+            "selfie_image_path": verification["selfie_image_path"],
+            "birth_certificate_image_path": verification["age_proof_image_path"],
+            "terms_accepted": bool(terms_accepted_at),
+            "terms_accepted_at": terms_accepted_at,
+            "terms_version": terms_version,
             "wallet_balance": float(row.get("walletBalance") or 100000.0),
             "currency": row.get("currency") or "NGN",
             "created_at": row.get("createdAt"),
@@ -163,6 +183,72 @@ def create_app() -> Flask:
         if not v:
             return None
         return v[:max_len]
+
+    def _verification_root() -> str:
+        root = os.path.join(os.path.dirname(__file__), "uploads", "verification")
+        os.makedirs(root, exist_ok=True)
+        return root
+
+    def _profile_name_tokens(value: str | None) -> set[str]:
+        if not value:
+            return set()
+        tokens = {
+            re.sub(r"[^a-z0-9]", "", part.lower())
+            for part in str(value).replace(",", " ").split()
+        }
+        return {token for token in tokens if token}
+
+    def _name_match_count(a: str | None, b: str | None) -> int:
+        return len(_profile_name_tokens(a) & _profile_name_tokens(b))
+
+    def _save_verification_file(user_id: str, kind: str, file_obj: Any) -> str:
+        if not file_obj or not getattr(file_obj, "filename", ""):
+            raise ValueError(f"missing_{kind}_image")
+        size = getattr(file_obj, "content_length", None)
+        if size is None:
+            stream = getattr(file_obj, "stream", None)
+            if stream is not None and hasattr(stream, "tell") and hasattr(stream, "seek"):
+                current = stream.tell()
+                stream.seek(0, os.SEEK_END)
+                size = stream.tell()
+                stream.seek(current)
+        if size is not None and int(size) > MAX_VERIFICATION_UPLOAD_BYTES:
+            raise ValueError("verification_file_too_large")
+        filename = secure_filename(file_obj.filename) or f"{kind}.jpg"
+        stamp = now_ms()
+        stored_name = f"{user_id}_{kind}_{stamp}_{filename}"
+        path = os.path.join(_verification_root(), stored_name)
+        file_obj.save(path)
+        return stored_name
+
+    def _verification_file_url(filename: str | None) -> str | None:
+        if not filename:
+            return None
+        return f"/api/admin/verification/uploads/{filename}"
+
+    def _verification_fields(profile: dict[str, Any] | None) -> dict[str, Any]:
+        row = profile or {}
+        verification_status = str(
+            row.get("verification_status")
+            or row.get("verificationStatus")
+            or row.get("kyc_status")
+            or row.get("kycStatus")
+            or ("approved" if row.get("verified") else "unsubmitted")
+        ).lower()
+        id_document_type = row.get("id_document_type") or row.get("idDocumentType")
+        return {
+            "verified": verification_status == "approved" or bool(row.get("verified")),
+            "verification_status": verification_status,
+            "verification_notes": row.get("verification_notes") or row.get("verificationNotes"),
+            "id_document_type": id_document_type,
+            "id_document_image_path": row.get("id_document_image_path") or row.get("idDocumentImagePath"),
+            "age_proof_type": row.get("age_proof_type") or row.get("ageProofType"),
+            "age_proof_image_path": row.get("age_proof_image_path") or row.get("ageProofImagePath") or row.get("birth_certificate_image_path") or row.get("birthCertificateImagePath"),
+            "birth_certificate_image_path": row.get("birth_certificate_image_path") or row.get("birthCertificateImagePath") or row.get("age_proof_image_path") or row.get("ageProofImagePath"),
+            "selfie_image_path": row.get("selfie_image_path") or row.get("selfieImagePath"),
+            "verification_submitted_at": row.get("verification_submitted_at") or row.get("verificationSubmittedAt"),
+            "verification_reviewed_at": row.get("verification_reviewed_at") or row.get("verificationReviewedAt"),
+        }
 
     def _normalize_options(options: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
         rows = [item for item in (options or []) if isinstance(item, dict)]
@@ -873,13 +959,7 @@ def create_app() -> Flask:
             "handle": profile.get("handle"),
             "bio": profile.get("bio"),
             "avatar_url": profile.get("avatar_url"),
-            "phone_number": profile.get("phone_number"),
-            "bvn": profile.get("bvn"),
-            "nin": profile.get("nin"),
-            "passport_number": profile.get("passport_number"),
-            "verified": bool(profile.get("verified")),
-            "kyc_status": profile.get("kyc_status") or profile.get("kycStatus") or ("verified" if profile.get("verified") else "unsubmitted"),
-            "kyc_complete": bool(profile.get("kyc_complete")),
+            **_verification_fields(profile),
             "walletBalance": round(balance, 2),
             "currency": profile.get("currency") or "NGN",
             "createdAt": profile.get("createdAt") or now_ms(),
@@ -957,10 +1037,7 @@ def create_app() -> Flask:
         handle: str | None = None,
         bio: str | None = None,
         avatar_url: str | None = None,
-        phone_number: str | None = None,
-        bvn: str | None = None,
-        nin: str | None = None,
-        passport_number: str | None = None,
+        terms_accepted: bool | None = None,
     ) -> dict[str, Any]:
         def clean(value: str | None, max_len: int) -> str | None:
             if value is None:
@@ -972,32 +1049,22 @@ def create_app() -> Flask:
 
         existing = _query_profile(user_id)
         existing = existing or {}
-        current_phone = existing.get("phone_number") or existing.get("phoneNumber")
-        current_bvn = existing.get("bvn")
-        current_nin = existing.get("nin")
-        current_passport_number = existing.get("passport_number") or existing.get("passportNumber")
-        next_phone = clean(phone_number, 20) if phone_number is not None else current_phone
-        next_bvn = clean(bvn, 20) if bvn is not None else current_bvn
-        next_nin = clean(nin, 20) if nin is not None else current_nin
-        next_passport_number = clean(passport_number, 30) if passport_number is not None else current_passport_number
-        kyc_complete = bool(next_phone and (next_bvn or next_nin or next_passport_number))
         profile = {
             "userId": user_id,
             "display_name": clean(display_name, 200) if display_name is not None else existing.get("display_name"),
             "handle": clean(handle, 50) if handle is not None else existing.get("handle"),
             "bio": clean(bio, 2000) if bio is not None else existing.get("bio"),
             "avatar_url": clean(avatar_url, 500) if avatar_url is not None else existing.get("avatar_url"),
-            "phone_number": next_phone,
-            "bvn": next_bvn,
-            "nin": next_nin,
-            "passport_number": next_passport_number,
-            "verified": bool(existing.get("verified")),
-            "kyc_status": "verified" if existing.get("verified") else ("pending" if kyc_complete else "unsubmitted"),
-            "kyc_complete": kyc_complete,
+            **_verification_fields(existing),
+            "terms_accepted_at": existing.get("terms_accepted_at") or existing.get("termsAcceptedAt"),
+            "terms_version": existing.get("terms_version") or existing.get("termsVersion"),
             "walletBalance": float(existing.get("walletBalance") or 100000.0) if existing else 100000.0,
             "currency": existing.get("currency") if existing and existing.get("currency") else "NGN",
             "updatedAt": now_ms(),
         }
+        if terms_accepted:
+            profile["terms_accepted_at"] = existing.get("terms_accepted_at") or existing.get("termsAcceptedAt") or now_ms()
+            profile["terms_version"] = TERMS_VERSION
         profile_id = str(existing.get("id")) if existing and existing.get("id") else str(uuid.uuid4())
         if existing and existing.get("createdAt") is not None:
             profile["createdAt"] = existing.get("createdAt")
@@ -1211,14 +1278,211 @@ def create_app() -> Flask:
                 handle=data.get("handle"),
                 bio=data.get("bio"),
                 avatar_url=data.get("avatar_url"),
-                phone_number=data.get("phone_number"),
-                bvn=data.get("bvn"),
-                nin=data.get("nin"),
-                passport_number=data.get("passport_number"),
+                terms_accepted=bool(data.get("terms_accepted") or data.get("termsAccepted")),
             )
         except Exception as exc:
             return jsonify({"error": "profile_save_failed", "detail": str(exc)}), 500
         return jsonify(profile)
+
+    @app.get("/api/me/verification")
+    @require_auth
+    def me_verification():
+        user_id = g.clerk_user_id
+        try:
+            profile = _query_profile(user_id)
+        except Exception as exc:
+            return jsonify({"error": "verification_load_failed", "detail": str(exc)}), 500
+        serialized = _serialize_profile(profile, user_id)
+        return jsonify(
+            {
+                **serialized,
+                "verification_status": serialized.get("verification_status"),
+                "verification_ready": serialized.get("verification_ready"),
+                "document_url": _verification_file_url(serialized.get("id_document_image_path")),
+                "age_proof_url": _verification_file_url(serialized.get("age_proof_image_path")),
+                "selfie_url": _verification_file_url(serialized.get("selfie_image_path")),
+            }
+        )
+
+    @app.post("/api/me/verification")
+    @require_auth
+    def submit_verification():
+        user_id = g.clerk_user_id
+        try:
+            profile = _query_profile(user_id) or {"userId": user_id, "walletBalance": 100000.0, "currency": "NGN"}
+            display_name = str(profile.get("display_name") or "").strip()
+            if not display_name:
+                return jsonify({"error": "profile_incomplete"}), 400
+
+            form = request.form or {}
+            doc_type = str(form.get("document_type") or form.get("documentType") or "").strip().lower()
+            if doc_type not in {"nin_slip", "voters_card", "passport", "no_id"}:
+                return jsonify({"error": "invalid_document_type"}), 400
+
+            id_file = request.files.get("document_image") or request.files.get("id_image")
+            age_proof_type = str(form.get("age_proof_type") or form.get("ageProofType") or "").strip().lower()
+            age_proof_file = request.files.get("age_proof_image") or request.files.get("ageProofImage")
+            selfie_file = request.files.get("selfie_image")
+            if not selfie_file:
+                return jsonify({"error": "missing_files", "required": ["selfie_image"]}), 400
+            if doc_type == "no_id":
+                if age_proof_type not in {"work_id", "student_card", "university_id", "birth_certificate"}:
+                    return jsonify({"error": "invalid_age_proof_type"}), 400
+                if not age_proof_file:
+                    return jsonify({"error": "missing_files", "required": ["age_proof_image"]}), 400
+            elif not id_file:
+                return jsonify({"error": "missing_files", "required": ["document_image"]}), 400
+
+            stored_doc = _save_verification_file(user_id, "id", id_file) if id_file else None
+            stored_age_proof = _save_verification_file(user_id, "age_proof", age_proof_file) if age_proof_file else None
+            stored_selfie = _save_verification_file(user_id, "selfie", selfie_file)
+            now_created = now_ms()
+            payload = {
+                "userId": user_id,
+                "display_name": profile.get("display_name"),
+                "handle": profile.get("handle"),
+                "bio": profile.get("bio"),
+                "avatar_url": profile.get("avatar_url"),
+                "verified": False,
+                "verification_status": "pending_review",
+                "verification_notes": None,
+                "id_document_type": doc_type,
+                "id_document_image_path": stored_doc,
+                "age_proof_type": age_proof_type or None,
+                "age_proof_image_path": stored_age_proof,
+                "selfie_image_path": stored_selfie,
+                "birth_certificate_image_path": stored_age_proof,
+                "verification_submitted_at": now_created,
+                "verification_reviewed_at": None,
+                "walletBalance": float(profile.get("walletBalance") or 100000.0),
+                "currency": profile.get("currency") or "NGN",
+                "createdAt": profile.get("createdAt") or now_created,
+                "updatedAt": now_created,
+            }
+            profile_id = str(profile.get("id") or uuid.uuid4())
+            admin_transact([["update", "profiles", profile_id, payload]])
+            stored = _query_profile(user_id)
+            if not stored:
+                return jsonify({"error": "verification_save_failed"}), 500
+            return jsonify(_serialize_profile(stored, user_id))
+        except Exception as exc:
+            return jsonify({"error": "verification_save_failed", "detail": str(exc)}), 500
+
+    @app.get("/api/me/withdrawals")
+    @require_auth
+    def me_withdrawals():
+        user_id = g.clerk_user_id
+        try:
+            data = admin_query({"withdrawal_requests": {"$": {"where": {"userId": user_id}}}})
+            rows = _as_list(data.get("withdrawal_requests"))
+            rows.sort(key=lambda item: item.get("createdAt", 0), reverse=True)
+        except Exception as exc:
+            return jsonify({"error": "withdrawals_load_failed", "detail": str(exc)}), 500
+        return jsonify(
+            {
+                "withdrawals": [
+                    {
+                        "id": row.get("id"),
+                        "amount": _parse_float(row.get("amount")),
+                        "status": row.get("status"),
+                        "bank_name": row.get("bankName"),
+                        "account_name": row.get("accountName"),
+                        "account_number": row.get("accountNumber"),
+                        "note": row.get("note"),
+                        "created_at": row.get("createdAt"),
+                        "updated_at": row.get("updatedAt"),
+                    }
+                    for row in rows
+                ]
+            }
+        )
+
+    @app.post("/api/me/withdrawals")
+    @require_auth
+    def request_withdrawal():
+        user_id = g.clerk_user_id
+        data = request.get_json(silent=True) or {}
+        try:
+            amount = _parse_float(data.get("amount"))
+            bank_name = _clean_text(str(data.get("bank_name") or data.get("bankName") or ""), 120)
+            account_name = _clean_text(str(data.get("account_name") or data.get("accountName") or ""), 200)
+            account_number = _clean_text(str(data.get("account_number") or data.get("accountNumber") or ""), 20)
+            if amount <= 0:
+                return jsonify({"error": "amount_must_be_positive"}), 400
+            if not bank_name or not account_name or not account_number:
+                return jsonify({"error": "missing_fields", "required": ["amount", "bank_name", "account_name", "account_number"]}), 400
+
+            with trade_lock:
+                profile = _query_profile(user_id)
+                if not profile:
+                    return jsonify({"error": "profile_not_found"}), 404
+                verification_status = str(
+                    profile.get("verification_status")
+                    or profile.get("verificationStatus")
+                    or ("approved" if profile.get("verified") else "unsubmitted")
+                ).lower()
+                if verification_status != "approved" or not profile.get("verified"):
+                    return jsonify({"error": "verification_required"}), 400
+                display_name = str(profile.get("display_name") or "").strip()
+                if _name_match_count(display_name, account_name) < 2:
+                    return jsonify({"error": "account_name_mismatch"}), 400
+
+                wallet_before = _wallet_balance(user_id)
+                if wallet_before < amount:
+                    return jsonify({"error": "insufficient_wallet_balance"}), 400
+                next_wallet_balance = round(wallet_before - amount, 2)
+                profile_id = str(profile.get("id") or uuid.uuid4())
+                updated_profile = {
+                    "userId": user_id,
+                    "display_name": profile.get("display_name"),
+                    "handle": profile.get("handle"),
+                    "bio": profile.get("bio"),
+                    "avatar_url": profile.get("avatar_url"),
+                    **_verification_fields(profile),
+                    "walletBalance": next_wallet_balance,
+                    "currency": profile.get("currency") or "NGN",
+                    "createdAt": profile.get("createdAt") or now_ms(),
+                    "updatedAt": now_ms(),
+                }
+                request_id = str(uuid.uuid4())
+                created_at = now_ms()
+                admin_transact(
+                    [
+                        ["update", "profiles", profile_id, updated_profile],
+                        [
+                            "update",
+                            "withdrawal_requests",
+                            request_id,
+                            {
+                                "userId": user_id,
+                                "amount": round(amount, 2),
+                                "status": "pending_review",
+                                "bankName": bank_name,
+                                "accountName": account_name,
+                                "accountNumber": account_number,
+                                "note": "Withdrawal request submitted",
+                                "createdAt": created_at,
+                                "updatedAt": created_at,
+                            },
+                        ],
+                    ]
+                )
+                return jsonify(
+                    {
+                        "withdrawal": {
+                            "id": request_id,
+                            "amount": round(amount, 2),
+                            "status": "pending_review",
+                            "bank_name": bank_name,
+                            "account_name": account_name,
+                            "account_number": account_number,
+                            "created_at": created_at,
+                        },
+                        "wallet_balance": _wallet_balance(user_id),
+                    }
+                )
+        except Exception as exc:
+            return jsonify({"error": "withdrawal_failed", "detail": str(exc)}), 400
 
     @app.get("/api/me/portfolio")
     @require_auth
@@ -1414,13 +1678,7 @@ def create_app() -> Flask:
                     "handle": profile.get("handle"),
                     "bio": profile.get("bio"),
                     "avatar_url": profile.get("avatar_url"),
-                    "phone_number": profile.get("phone_number"),
-                    "bvn": profile.get("bvn"),
-                    "nin": profile.get("nin"),
-                    "passport_number": profile.get("passport_number"),
-                    "verified": bool(profile.get("verified")),
-                    "kyc_status": profile.get("kyc_status") or profile.get("kycStatus") or ("verified" if profile.get("verified") else "unsubmitted"),
-                    "kyc_complete": bool(profile.get("kyc_complete")),
+                    **_verification_fields(profile),
                     "walletBalance": next_wallet_balance,
                     "currency": profile.get("currency") or "NGN",
                     "createdAt": profile.get("createdAt") or now_ms(),
@@ -1583,13 +1841,7 @@ def create_app() -> Flask:
                     "handle": profile.get("handle"),
                     "bio": profile.get("bio"),
                     "avatar_url": profile.get("avatar_url"),
-                    "phone_number": profile.get("phone_number"),
-                    "bvn": profile.get("bvn"),
-                    "nin": profile.get("nin"),
-                    "passport_number": profile.get("passport_number"),
-                    "verified": bool(profile.get("verified")),
-                    "kyc_status": profile.get("kyc_status") or profile.get("kycStatus") or ("verified" if profile.get("verified") else "unsubmitted"),
-                    "kyc_complete": bool(profile.get("kyc_complete")),
+                    **_verification_fields(profile),
                     "walletBalance": next_wallet_balance,
                     "currency": profile.get("currency") or "NGN",
                     "createdAt": profile.get("createdAt") or now_ms(),
@@ -1926,13 +2178,7 @@ def create_app() -> Flask:
                     "handle": profile.get("handle"),
                     "bio": profile.get("bio"),
                     "avatar_url": profile.get("avatar_url"),
-                    "phone_number": profile.get("phone_number"),
-                    "bvn": profile.get("bvn"),
-                    "nin": profile.get("nin"),
-                    "passport_number": profile.get("passport_number"),
-                    "verified": bool(profile.get("verified")),
-                    "kyc_status": profile.get("kyc_status") or profile.get("kycStatus") or ("verified" if profile.get("verified") else "unsubmitted"),
-                    "kyc_complete": bool(profile.get("kyc_complete")),
+                    **_verification_fields(profile),
                     "walletBalance": next_balance,
                     "currency": profile.get("currency") or "NGN",
                     "createdAt": profile.get("createdAt") or resolved_at_ms,
@@ -2151,6 +2397,7 @@ def create_app() -> Flask:
             profiles = _query_all_profiles()
             events = _query_all_events()
             markets = {str(r.get("id")): r for r in _query_markets()}
+            withdrawals = _as_list(admin_query({"withdrawal_requests": {}}).get("withdrawal_requests"))
         except Exception as exc:
             return jsonify({"error": "admin_audit_failed", "detail": str(exc)}), 500
 
@@ -2163,18 +2410,59 @@ def create_app() -> Flask:
                 continue
             events_by_user_id.setdefault(str(user_id), []).append(event)
 
+        withdrawals_by_user_id: dict[str, list[dict[str, Any]]] = {}
+        for row in withdrawals:
+            user_id = row.get("userId")
+            if not user_id:
+                continue
+            withdrawals_by_user_id.setdefault(str(user_id), []).append(row)
+
         for user_id, profile in profiles_by_user_id.items():
             user_events = events_by_user_id.get(user_id, [])
+            serial = _serialize_profile(profile, user_id)
+            user_withdrawals = withdrawals_by_user_id.get(user_id, [])
             users.append(
                 {
                     "user_id": user_id,
-                    "display_name": profile.get("display_name"),
-                    "handle": profile.get("handle"),
-                    "verified": bool(profile.get("verified")),
-                    "wallet_balance": float(profile.get("walletBalance") or 100000.0),
-                    "currency": profile.get("currency") or "NGN",
-                    "updated_at": profile.get("updatedAt"),
-                    "created_at": profile.get("createdAt"),
+                    "display_name": serial.get("display_name"),
+                    "handle": serial.get("handle"),
+                    "bio": serial.get("bio"),
+                    "avatar_url": serial.get("avatar_url"),
+                    "verified": serial.get("verified"),
+                    "verification_status": serial.get("verification_status"),
+                    "verification_ready": serial.get("verification_ready"),
+                    "id_document_type": serial.get("id_document_type"),
+                    "id_document_image_path": serial.get("id_document_image_path"),
+                    "id_document_url": _verification_file_url(serial.get("id_document_image_path")),
+                    "age_proof_type": serial.get("age_proof_type"),
+                    "age_proof_image_path": serial.get("age_proof_image_path"),
+                    "age_proof_url": _verification_file_url(serial.get("age_proof_image_path")),
+                    "selfie_image_path": serial.get("selfie_image_path"),
+                    "selfie_url": _verification_file_url(serial.get("selfie_image_path")),
+                    "verification_notes": serial.get("verification_notes"),
+                    "verification_submitted_at": serial.get("verification_submitted_at"),
+                    "verification_reviewed_at": serial.get("verification_reviewed_at"),
+                    "terms_accepted": serial.get("terms_accepted"),
+                    "terms_accepted_at": serial.get("terms_accepted_at"),
+                    "terms_version": serial.get("terms_version"),
+                    "wallet_balance": serial.get("wallet_balance"),
+                    "currency": serial.get("currency"),
+                    "updated_at": serial.get("updated_at"),
+                    "created_at": serial.get("created_at"),
+                    "withdrawals": [
+                        {
+                            "id": row.get("id"),
+                            "amount": _parse_float(row.get("amount")),
+                            "status": row.get("status"),
+                            "bank_name": row.get("bankName"),
+                            "account_name": row.get("accountName"),
+                            "account_number": row.get("accountNumber"),
+                            "note": row.get("note"),
+                            "created_at": row.get("createdAt"),
+                            "updated_at": row.get("updatedAt"),
+                        }
+                        for row in user_withdrawals
+                    ],
                     "transactions": [
                         {
                             "id": event.get("id"),
@@ -2200,6 +2488,216 @@ def create_app() -> Flask:
 
         users.sort(key=lambda item: item.get("updated_at", item.get("created_at", 0)), reverse=True)
         return jsonify({"users": users, "total_users": len(users), "total_transactions": len(events)})
+
+    @app.get("/api/admin/verification")
+    @require_auth
+    def admin_verification_queue():
+        if not is_admin_user(g.clerk_user_id):
+            return jsonify({"error": "forbidden"}), 403
+        try:
+            profiles = _query_all_profiles()
+        except Exception as exc:
+            return jsonify({"error": "admin_verification_failed", "detail": str(exc)}), 500
+        queue: list[dict[str, Any]] = []
+        for profile in profiles:
+            verification_status = str(
+                profile.get("verification_status")
+                or profile.get("verificationStatus")
+                or ("approved" if profile.get("verified") else "unsubmitted")
+            ).lower()
+            if verification_status not in {"pending_review", "approved", "rejected"}:
+                continue
+            queue.append(
+                {
+                    "user_id": profile.get("userId"),
+                    "display_name": profile.get("display_name"),
+                    "handle": profile.get("handle"),
+                    "verification_status": verification_status,
+                    "verified": bool(profile.get("verified")),
+                    "id_document_type": profile.get("id_document_type") or profile.get("idDocumentType"),
+                    "document_url": _verification_file_url(profile.get("id_document_image_path") or profile.get("idDocumentImagePath")),
+                    "age_proof_url": _verification_file_url(profile.get("age_proof_image_path") or profile.get("ageProofImagePath") or profile.get("birth_certificate_image_path") or profile.get("birthCertificateImagePath")),
+                    "selfie_url": _verification_file_url(profile.get("selfie_image_path") or profile.get("selfieImagePath")),
+                    "submitted_at": profile.get("verification_submitted_at") or profile.get("verificationSubmittedAt"),
+                    "reviewed_at": profile.get("verification_reviewed_at") or profile.get("verificationReviewedAt"),
+                    "notes": profile.get("verification_notes") or profile.get("verificationNotes"),
+                }
+            )
+        queue.sort(key=lambda item: item.get("submitted_at", 0), reverse=True)
+        return jsonify({"verifications": queue, "total": len(queue)})
+
+    @app.post("/api/admin/verification/<user_id>/approve")
+    @require_auth
+    def admin_verification_approve(user_id: str):
+        if not is_admin_user(g.clerk_user_id):
+            return jsonify({"error": "forbidden"}), 403
+        try:
+            profile = _query_profile(user_id)
+            if not profile:
+                return jsonify({"error": "not_found"}), 404
+            payload = {
+                "userId": user_id,
+                "display_name": profile.get("display_name"),
+                "handle": profile.get("handle"),
+                "bio": profile.get("bio"),
+                "avatar_url": profile.get("avatar_url"),
+                **_verification_fields(profile),
+                "verified": True,
+                "verification_status": "approved",
+                "verification_notes": None,
+                "verification_reviewed_at": now_ms(),
+                "walletBalance": float(profile.get("walletBalance") or 100000.0),
+                "currency": profile.get("currency") or "NGN",
+                "createdAt": profile.get("createdAt") or now_ms(),
+                "updatedAt": now_ms(),
+            }
+            profile_id = str(profile.get("id") or uuid.uuid4())
+            admin_transact([["update", "profiles", profile_id, payload]])
+            return jsonify({"ok": True, "user_id": user_id, "verification_status": "approved"})
+        except Exception as exc:
+            return jsonify({"error": "verification_approve_failed", "detail": str(exc)}), 500
+
+    @app.post("/api/admin/verification/<user_id>/reject")
+    @require_auth
+    def admin_verification_reject(user_id: str):
+        if not is_admin_user(g.clerk_user_id):
+            return jsonify({"error": "forbidden"}), 403
+        data = request.get_json(silent=True) or {}
+        note = _clean_text(str(data.get("note") or data.get("reason") or ""), 500)
+        try:
+            profile = _query_profile(user_id)
+            if not profile:
+                return jsonify({"error": "not_found"}), 404
+            payload = {
+                "userId": user_id,
+                "display_name": profile.get("display_name"),
+                "handle": profile.get("handle"),
+                "bio": profile.get("bio"),
+                "avatar_url": profile.get("avatar_url"),
+                **_verification_fields(profile),
+                "verified": False,
+                "verification_status": "rejected",
+                "verification_notes": note,
+                "verification_reviewed_at": now_ms(),
+                "walletBalance": float(profile.get("walletBalance") or 100000.0),
+                "currency": profile.get("currency") or "NGN",
+                "createdAt": profile.get("createdAt") or now_ms(),
+                "updatedAt": now_ms(),
+            }
+            profile_id = str(profile.get("id") or uuid.uuid4())
+            admin_transact([["update", "profiles", profile_id, payload]])
+            return jsonify({"ok": True, "user_id": user_id, "verification_status": "rejected"})
+        except Exception as exc:
+            return jsonify({"error": "verification_reject_failed", "detail": str(exc)}), 500
+
+    @app.get("/api/admin/verification/uploads/<path:filename>")
+    @require_auth
+    def admin_verification_upload(filename: str):
+        if not is_admin_user(g.clerk_user_id):
+            return jsonify({"error": "forbidden"}), 403
+        root = _verification_root()
+        if not filename or ".." in filename or filename.startswith("/"):
+            return jsonify({"error": "invalid_path"}), 400
+        return send_from_directory(root, filename)
+
+    @app.get("/api/admin/withdrawals")
+    @require_auth
+    def admin_withdrawals():
+        if not is_admin_user(g.clerk_user_id):
+            return jsonify({"error": "forbidden"}), 403
+        try:
+            data = admin_query({"withdrawal_requests": {}})
+            rows = _as_list(data.get("withdrawal_requests"))
+            rows.sort(key=lambda item: item.get("createdAt", 0), reverse=True)
+        except Exception as exc:
+            return jsonify({"error": "withdrawals_load_failed", "detail": str(exc)}), 500
+        return jsonify(
+            {
+                "withdrawals": [
+                    {
+                        "id": row.get("id"),
+                        "user_id": row.get("userId"),
+                        "amount": _parse_float(row.get("amount")),
+                        "status": row.get("status"),
+                        "bank_name": row.get("bankName"),
+                        "account_name": row.get("accountName"),
+                        "account_number": row.get("accountNumber"),
+                        "note": row.get("note"),
+                        "created_at": row.get("createdAt"),
+                        "updated_at": row.get("updatedAt"),
+                    }
+                    for row in rows
+                ]
+            }
+        )
+
+    @app.post("/api/admin/withdrawals/<withdrawal_id>/approve")
+    @require_auth
+    def admin_withdrawal_approve(withdrawal_id: str):
+        if not is_admin_user(g.clerk_user_id):
+            return jsonify({"error": "forbidden"}), 403
+        try:
+            data = admin_query({"withdrawal_requests": {"$": {"where": {"id": withdrawal_id}}}})
+            rows = _as_list(data.get("withdrawal_requests"))
+            row = rows[0] if rows else None
+            if not row:
+                return jsonify({"error": "not_found"}), 404
+            if str(row.get("status") or "").lower() in {"approved", "rejected", "paid"}:
+                return jsonify({"error": "already_processed"}), 400
+            payload = dict(row)
+            payload["status"] = "paid"
+            payload["note"] = "Withdrawal approved and finalized"
+            payload["updatedAt"] = now_ms()
+            admin_transact([["update", "withdrawal_requests", str(row.get("id")), payload]])
+            return jsonify({"ok": True, "withdrawal_id": withdrawal_id, "status": "paid"})
+        except Exception as exc:
+            return jsonify({"error": "withdrawal_approve_failed", "detail": str(exc)}), 500
+
+    @app.post("/api/admin/withdrawals/<withdrawal_id>/reject")
+    @require_auth
+    def admin_withdrawal_reject(withdrawal_id: str):
+        if not is_admin_user(g.clerk_user_id):
+            return jsonify({"error": "forbidden"}), 403
+        data = request.get_json(silent=True) or {}
+        note = _clean_text(str(data.get("note") or data.get("reason") or "Rejected"), 500) or "Rejected"
+        try:
+            data_rows = admin_query({"withdrawal_requests": {"$": {"where": {"id": withdrawal_id}}}})
+            rows = _as_list(data_rows.get("withdrawal_requests"))
+            row = rows[0] if rows else None
+            if not row:
+                return jsonify({"error": "not_found"}), 404
+            if str(row.get("status") or "").lower() in {"approved", "rejected", "paid"}:
+                return jsonify({"error": "already_processed"}), 400
+            user_id = str(row.get("userId") or "")
+            amount = _parse_float(row.get("amount"))
+            profile = _query_profile(user_id) or {}
+            next_balance = round(_parse_float(profile.get("walletBalance")) + amount, 2)
+            profile_payload = {
+                "userId": user_id,
+                "display_name": profile.get("display_name"),
+                "handle": profile.get("handle"),
+                "bio": profile.get("bio"),
+                "avatar_url": profile.get("avatar_url"),
+                **_verification_fields(profile),
+                "walletBalance": next_balance,
+                "currency": profile.get("currency") or "NGN",
+                "createdAt": profile.get("createdAt") or now_ms(),
+                "updatedAt": now_ms(),
+            }
+            payload = dict(row)
+            payload["status"] = "rejected"
+            payload["note"] = note
+            payload["updatedAt"] = now_ms()
+            profile_id = str(profile.get("id") or uuid.uuid4())
+            admin_transact(
+                [
+                    ["update", "profiles", profile_id, profile_payload],
+                    ["update", "withdrawal_requests", str(row.get("id")), payload],
+                ]
+            )
+            return jsonify({"ok": True, "withdrawal_id": withdrawal_id, "status": "rejected"})
+        except Exception as exc:
+            return jsonify({"error": "withdrawal_reject_failed", "detail": str(exc)}), 500
 
     @app.get("/api/admin/dashboard")
     @require_auth

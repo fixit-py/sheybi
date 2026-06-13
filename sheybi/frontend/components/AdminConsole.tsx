@@ -93,11 +93,30 @@ type AdminUser = {
   user_id: string;
   display_name: string | null;
   handle: string | null;
+  bio: string | null;
+  avatar_url: string | null;
   verified: boolean;
+  verification_status: string | null;
+  verification_ready: boolean;
+  terms_accepted: boolean;
+  terms_accepted_at: number | string | null;
+  terms_version: string | null;
+  id_document_type: string | null;
+  id_document_image_path: string | null;
+  id_document_url: string | null;
+  age_proof_type: string | null;
+  age_proof_image_path: string | null;
+  age_proof_url: string | null;
+  selfie_image_path: string | null;
+  selfie_url: string | null;
+  verification_notes: string | null;
+  verification_submitted_at: number | string | null;
+  verification_reviewed_at: number | string | null;
   wallet_balance: number;
   currency: string;
   created_at: number | string | null;
   updated_at: number | string | null;
+  withdrawals: AdminWithdrawalItem[];
   transactions: AdminTransaction[];
 };
 
@@ -105,6 +124,34 @@ type AdminAuditResponse = {
   users: AdminUser[];
   total_users: number;
   total_transactions: number;
+};
+
+type AdminVerificationItem = {
+  user_id: string | null;
+  display_name: string | null;
+  handle: string | null;
+  verification_status: string | null;
+  verified: boolean;
+  id_document_type: string | null;
+  document_url: string | null;
+  age_proof_url: string | null;
+  selfie_url: string | null;
+  submitted_at: number | string | null;
+  reviewed_at: number | string | null;
+  notes: string | null;
+};
+
+type AdminWithdrawalItem = {
+  id: string;
+  user_id: string | null;
+  amount: number;
+  status: string | null;
+  bank_name: string | null;
+  account_name: string | null;
+  account_number: string | null;
+  note: string | null;
+  created_at: number | string | null;
+  updated_at: number | string | null;
 };
 
 type DashboardResponse = {
@@ -235,7 +282,7 @@ type MarketForm = {
 };
 
 type AuditTab = "trades" | "risk" | "resolutions";
-type AdminSection = "overview" | "markets" | "audit" | "users";
+type AdminSection = "overview" | "verification" | "markets" | "audit" | "users";
 
 function defaultOptions(count: number) {
   const price = (100 / count).toFixed(2);
@@ -261,6 +308,8 @@ export default function AdminConsole() {
   const { getToken } = useAuth();
   const [dashboard, setDashboard] = useState<DashboardResponse | null>(null);
   const [audit, setAudit] = useState<AdminAuditResponse | null>(null);
+  const [verifications, setVerifications] = useState<AdminVerificationItem[]>([]);
+  const [withdrawals, setWithdrawals] = useState<AdminWithdrawalItem[]>([]);
   const [adminSection, setAdminSection] = useState<AdminSection>("overview");
   const [selectedMarketId, setSelectedMarketId] = useState<string>("");
   const [selectedResolvedMarketId, setSelectedResolvedMarketId] = useState<string>("");
@@ -289,20 +338,30 @@ export default function AdminConsole() {
     try {
       const token = await getToken();
       const headers = { Authorization: token ? `Bearer ${token}` : "" };
-      const [dashboardRes, auditRes] = await Promise.all([
+      const [dashboardRes, auditRes, verificationsRes, withdrawalsRes] = await Promise.all([
         fetch("/api/flask/admin/dashboard", { headers }),
         fetch("/api/flask/admin/users", { headers }),
+        fetch("/api/flask/admin/verification", { headers }),
+        fetch("/api/flask/admin/withdrawals", { headers }),
       ]);
-      const [dashboardJson, auditJson] = await Promise.all([
+      const [dashboardJson, auditJson, verificationsJson, withdrawalsJson] = await Promise.all([
         readJson(dashboardRes),
         readJson(auditRes),
+        readJson(verificationsRes),
+        readJson(withdrawalsRes),
       ]);
       if (!dashboardRes.ok) throw new Error(`dashboard HTTP ${dashboardRes.status}`);
       if (!auditRes.ok) throw new Error(`audit HTTP ${auditRes.status}`);
+      if (!verificationsRes.ok) throw new Error(`verification HTTP ${verificationsRes.status}`);
+      if (!withdrawalsRes.ok) throw new Error(`withdrawals HTTP ${withdrawalsRes.status}`);
       const nextDashboard = dashboardJson as DashboardResponse;
       const nextAudit = auditJson as AdminAuditResponse;
+      const nextVerifications = (verificationsJson as { verifications?: AdminVerificationItem[] })?.verifications ?? [];
+      const nextWithdrawals = (withdrawalsJson as { withdrawals?: AdminWithdrawalItem[] })?.withdrawals ?? [];
       setDashboard(nextDashboard);
       setAudit(nextAudit);
+      setVerifications(nextVerifications as AdminVerificationItem[]);
+      setWithdrawals(nextWithdrawals as AdminWithdrawalItem[]);
       setResolutionByMarket((current) => {
         const next = { ...current };
         for (const market of nextDashboard.markets ?? []) {
@@ -334,6 +393,33 @@ export default function AdminConsole() {
     }
   }, [getToken]);
 
+  const postAdminAction = useCallback(
+    async (path: string, body?: Record<string, unknown>) => {
+      setBusy(true);
+      setError(null);
+      try {
+        const token = await getToken();
+        const res = await fetch(`/api/flask${path}`, {
+          method: "POST",
+          headers: {
+            Authorization: token ? `Bearer ${token}` : "",
+            "Content-Type": "application/json",
+          },
+          body: body ? JSON.stringify(body) : undefined,
+        });
+        const json = await readJson(res);
+        if (!res.ok) throw new Error((json as { error?: string })?.error || `HTTP ${res.status}`);
+        setSuccess("Updated.");
+        await load();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [getToken, load],
+  );
+
   useEffect(() => {
     const timer = window.setTimeout(() => {
       void load();
@@ -350,6 +436,7 @@ export default function AdminConsole() {
     () => users.find((user) => user.user_id === selectedUserId) ?? users[0] ?? null,
     [selectedUserId, users],
   );
+  const selectedUserWithdrawals = useMemo(() => selectedUser?.withdrawals ?? [], [selectedUser]);
   const selectedMarket = useMemo(
     () => openMarkets.find((market) => market.id === selectedMarketId) ?? openMarkets[0] ?? null,
     [openMarkets, selectedMarketId],
@@ -545,6 +632,7 @@ export default function AdminConsole() {
         <div className="mt-5 flex flex-wrap gap-2 border-t border-zinc-200 pt-5 dark:border-zinc-800">
           {[
             ["overview", "Overview"],
+            ["verification", "Verification"],
             ["markets", "Markets"],
             ["audit", "Audit"],
             ["users", "Users"],
@@ -679,6 +767,135 @@ export default function AdminConsole() {
             </div>
           </div>
         </>
+      ) : null}
+
+      {adminSection === "verification" ? (
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(380px,0.8fr)]">
+          <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-black">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <h2 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
+                  Verification Queue
+                </h2>
+                <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+                  Manual review before withdrawals can be requested.
+                </p>
+              </div>
+              <div className="text-xs text-zinc-500 dark:text-zinc-400">
+                {verifications.length} submissions
+              </div>
+            </div>
+
+            <div className="mt-4 space-y-3">
+              {verifications.length ? (
+                verifications.map((item) => (
+                  <div key={item.user_id || `${item.display_name}-${item.submitted_at}`} className="rounded-2xl bg-zinc-50 p-4 dark:bg-zinc-900">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                      <div>
+                        <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+                          {item.display_name || item.handle || item.user_id || "User"}
+                        </div>
+                        <div className="text-xs text-zinc-500 dark:text-zinc-400">
+                          {item.handle ? `@${item.handle}` : item.user_id || "—"}
+                        </div>
+                      </div>
+                      <div className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-zinc-700 dark:bg-zinc-950 dark:text-zinc-300">
+                        {item.verification_status || "unsubmitted"}
+                      </div>
+                    </div>
+                      <div className="mt-3 grid grid-cols-2 gap-3 text-xs text-zinc-600 dark:text-zinc-300">
+                        <span>Document: {item.id_document_type || "—"}</span>
+                        <span>Submitted: {formatIso(item.submitted_at)}</span>
+                        <span>Reviewed: {formatIso(item.reviewed_at)}</span>
+                        <span>Verified: {item.verified ? "Yes" : "No"}</span>
+                      </div>
+                      <div className="mt-3 grid gap-3 lg:grid-cols-3">
+                        <VerificationPreview href={item.document_url} label="ID" />
+                        <VerificationPreview href={item.age_proof_url} label="Age proof" />
+                        <VerificationPreview href={item.selfie_url} label="Selfie" />
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <button
+                        type="button"
+                        onClick={() => item.user_id && void postAdminAction(`/admin/verification/${item.user_id}/approve`)}
+                        className="rounded-full bg-zinc-950 px-3 py-2 text-xs font-semibold text-white dark:bg-zinc-100 dark:text-zinc-950"
+                        disabled={!item.user_id}
+                      >
+                        Approve
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => item.user_id && void postAdminAction(`/admin/verification/${item.user_id}/reject`, { note: "Rejected by admin" })}
+                        className="rounded-full border border-zinc-200 px-3 py-2 text-xs font-semibold text-zinc-700 dark:border-zinc-800 dark:text-zinc-300"
+                        disabled={!item.user_id}
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="rounded-2xl border border-dashed border-zinc-200 p-4 text-sm text-zinc-600 dark:border-zinc-800 dark:text-zinc-400">
+                  No verification submissions yet.
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-black">
+            <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">Withdrawal queue</div>
+            <div className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+              Withdrawals are still manual and queue here for review.
+            </div>
+            <div className="mt-3 space-y-3">
+              {withdrawals.length ? (
+                withdrawals.map((item) => (
+                  <div key={item.id} className="rounded-2xl bg-zinc-50 p-4 dark:bg-zinc-900">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                      <div>
+                        <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+                          {money(item.amount)}
+                        </div>
+                        <div className="text-xs text-zinc-500 dark:text-zinc-400">
+                          {item.bank_name || "Bank"} · {item.account_name || "—"}
+                        </div>
+                        <div className="text-xs text-zinc-500 dark:text-zinc-400">
+                          {item.account_number || "—"} · {item.user_id || "—"}
+                        </div>
+                      </div>
+                      <div className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-zinc-700 dark:bg-zinc-950 dark:text-zinc-300">
+                        {item.status || "pending"}
+                      </div>
+                    </div>
+                    <div className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+                      {formatIso(item.created_at)}
+                    </div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void postAdminAction(`/admin/withdrawals/${item.id}/approve`)}
+                        className="rounded-full bg-zinc-950 px-3 py-2 text-xs font-semibold text-white dark:bg-zinc-100 dark:text-zinc-950"
+                      >
+                        Approve
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void postAdminAction(`/admin/withdrawals/${item.id}/reject`, { note: "Rejected by admin" })}
+                        className="rounded-full border border-zinc-200 px-3 py-2 text-xs font-semibold text-zinc-700 dark:border-zinc-800 dark:text-zinc-300"
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="rounded-2xl border border-dashed border-zinc-200 p-4 text-sm text-zinc-600 dark:border-zinc-800 dark:text-zinc-400">
+                  No withdrawal requests yet.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       ) : null}
 
       {adminSection === "markets" ? (
@@ -1362,51 +1579,157 @@ export default function AdminConsole() {
 
             <div className="rounded-2xl border border-zinc-200 p-4 dark:border-zinc-800">
               {selectedUser ? (
-                <>
-                  <div className="flex flex-col gap-1 border-b border-zinc-200 pb-4 dark:border-zinc-800">
-                    <div className="text-lg font-semibold text-zinc-900 dark:text-zinc-50">
-                      {selectedUser.display_name || selectedUser.handle || selectedUser.user_id}
-                    </div>
-                    <div className="text-sm text-zinc-500 dark:text-zinc-400">
-                      {selectedUser.handle ? `@${selectedUser.handle}` : selectedUser.user_id}
-                    </div>
-                    <div className="text-sm text-zinc-500 dark:text-zinc-400">
-                      Wallet: {money(selectedUser.wallet_balance)}
-                    </div>
-                  </div>
-                  <div className="mt-4 grid gap-3">
-                    {selectedUser.transactions.length ? (
-                      selectedUser.transactions.map((tx) => (
-                        <div key={tx.id} className="rounded-2xl bg-zinc-50 p-4 dark:bg-zinc-900">
-                          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                            <div>
-                              <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
-                                {tx.type || "TX"}
-                                {tx.option_label ? ` · ${tx.option_label}` : ""}
-                              </div>
-                              <div className="text-xs text-zinc-500 dark:text-zinc-400">
-                                {formatIso(tx.t || tx.created_at)}
-                              </div>
-                            </div>
-                            <div className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-zinc-700 dark:bg-zinc-950 dark:text-zinc-300">
-                              {tx.market_title || tx.market_id || "Market"}
-                            </div>
-                          </div>
-                          <div className="mt-3 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
-                            <InfoLine label="Amount" value={money(tx.amount)} />
-                            <InfoLine label="Quantity" value={String(tx.quantity ?? tx.shares ?? "—")} />
-                            <InfoLine label="Price" value={money(tx.price)} />
-                            <InfoLine label="Display name" value={tx.display_name || "—"} />
-                          </div>
+                <div className="grid gap-5">
+                  <div className="flex flex-col gap-3 border-b border-zinc-200 pb-4 dark:border-zinc-800">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                      <div>
+                        <div className="text-lg font-semibold text-zinc-900 dark:text-zinc-50">
+                          {selectedUser.display_name || selectedUser.handle || selectedUser.user_id}
                         </div>
-                      ))
-                    ) : (
-                      <div className="rounded-2xl border border-dashed border-zinc-200 p-4 text-sm text-zinc-600 dark:border-zinc-800 dark:text-zinc-400">
-                        No transactions for this user.
+                        <div className="text-sm text-zinc-500 dark:text-zinc-400">
+                          {selectedUser.handle ? `@${selectedUser.handle}` : selectedUser.user_id}
+                        </div>
                       </div>
-                    )}
+                      <div className="flex flex-wrap gap-2">
+                        <span className="rounded-full border border-zinc-200 bg-white px-3 py-1 text-xs font-semibold text-zinc-700 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300">
+                          {selectedUser.verified ? "Verified" : "Unverified"}
+                        </span>
+                        <span className="rounded-full border border-zinc-200 bg-white px-3 py-1 text-xs font-semibold text-zinc-700 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300">
+                          {selectedUser.verification_status || "unsubmitted"}
+                        </span>
+                        <span className="rounded-full border border-zinc-200 bg-white px-3 py-1 text-xs font-semibold text-zinc-700 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300">
+                          {selectedUser.verification_ready ? "KYC ready" : "KYC incomplete"}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                      <InfoLine label="Wallet" value={money(selectedUser.wallet_balance)} />
+                      <InfoLine label="Currency" value={selectedUser.currency || "NGN"} />
+                      <InfoLine label="Created" value={formatIso(selectedUser.created_at)} />
+                      <InfoLine label="Updated" value={formatIso(selectedUser.updated_at)} />
+                      <InfoLine label="Terms accepted" value={selectedUser.terms_accepted ? "Yes" : "No"} />
+                      <InfoLine label="Terms date" value={formatIso(selectedUser.terms_accepted_at)} />
+                      <InfoLine label="Terms version" value={selectedUser.terms_version || "—"} />
+                    </div>
                   </div>
-                </>
+
+                  <div className="grid gap-3 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <DetailCard label="Display name" value={selectedUser.display_name || "—"} />
+                      <DetailCard label="Handle" value={selectedUser.handle ? `@${selectedUser.handle}` : "—"} />
+                      <DetailCard label="Bio" value={selectedUser.bio || "—"} multiline />
+                      <DetailCard label="Avatar URL" value={selectedUser.avatar_url || "—"} multiline />
+                      <DetailCard label="Verification notes" value={selectedUser.verification_notes || "—"} multiline />
+                      <DetailCard label="ID document type" value={selectedUser.id_document_type || "—"} />
+                      <DetailCard label="Age proof type" value={selectedUser.age_proof_type || "—"} />
+                      <DetailCard label="Verification submitted" value={formatIso(selectedUser.verification_submitted_at)} />
+                      <DetailCard label="Verification reviewed" value={formatIso(selectedUser.verification_reviewed_at)} />
+                    </div>
+
+                    <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-900">
+                      <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">Verification Media</div>
+                      <div className="mt-3 grid gap-3">
+                        <VerificationPreview href={selectedUser.id_document_url} label="ID document" />
+                        <VerificationPreview href={selectedUser.age_proof_url} label="Age proof" />
+                        <VerificationPreview href={selectedUser.selfie_url} label="Selfie" />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-900">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+                          Withdrawal Requests
+                        </div>
+                        <div className="text-xs text-zinc-500 dark:text-zinc-400">
+                          {selectedUserWithdrawals.length} request{selectedUserWithdrawals.length === 1 ? "" : "s"} on file
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mt-3 grid gap-3">
+                      {selectedUserWithdrawals.length ? (
+                        selectedUserWithdrawals.map((item) => (
+                          <div key={item.id} className="rounded-2xl bg-white p-4 dark:bg-black">
+                            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                              <div>
+                                <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+                                  {money(item.amount)}
+                                </div>
+                                <div className="text-xs text-zinc-500 dark:text-zinc-400">
+                                  {item.bank_name || "Bank"} · {item.account_name || "—"}
+                                </div>
+                                <div className="text-xs text-zinc-500 dark:text-zinc-400">
+                                  {item.account_number || "—"}
+                                </div>
+                                <div className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                                  {formatIso(item.created_at)}
+                                </div>
+                              </div>
+                              <div className="rounded-full bg-zinc-50 px-3 py-1 text-xs font-semibold text-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
+                                {item.status || "pending"}
+                              </div>
+                            </div>
+                            {item.note ? (
+                              <div className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+                                Note: {item.note}
+                              </div>
+                            ) : null}
+                          </div>
+                        ))
+                      ) : (
+                        <div className="rounded-2xl border border-dashed border-zinc-200 bg-white p-4 text-sm text-zinc-600 dark:border-zinc-800 dark:bg-black dark:text-zinc-400">
+                          No withdrawal requests for this user.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-900">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+                          Transactions
+                        </div>
+                        <div className="text-xs text-zinc-500 dark:text-zinc-400">
+                          {selectedUser.transactions.length} ledger entries
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mt-3 grid gap-3">
+                      {selectedUser.transactions.length ? (
+                        selectedUser.transactions.map((tx) => (
+                          <div key={tx.id} className="rounded-2xl bg-white p-4 dark:bg-black">
+                            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                              <div>
+                                <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+                                  {tx.type || "TX"}
+                                  {tx.option_label ? ` · ${tx.option_label}` : ""}
+                                </div>
+                                <div className="text-xs text-zinc-500 dark:text-zinc-400">
+                                  {formatIso(tx.t || tx.created_at)}
+                                </div>
+                              </div>
+                              <div className="rounded-full bg-zinc-50 px-3 py-1 text-xs font-semibold text-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
+                                {tx.market_title || tx.market_id || "Market"}
+                              </div>
+                            </div>
+                            <div className="mt-3 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+                              <InfoLine label="Amount" value={money(tx.amount)} />
+                              <InfoLine label="Quantity" value={String(tx.quantity ?? tx.shares ?? "—")} />
+                              <InfoLine label="Price" value={money(tx.price)} />
+                              <InfoLine label="Display name" value={tx.display_name || "—"} />
+                            </div>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="rounded-2xl border border-dashed border-zinc-200 bg-white p-4 text-sm text-zinc-600 dark:border-zinc-800 dark:bg-black dark:text-zinc-400">
+                          No transactions for this user.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
               ) : (
                 <div className="rounded-2xl border border-dashed border-zinc-200 p-4 text-sm text-zinc-600 dark:border-zinc-800 dark:text-zinc-400">
                   Select a user to inspect their transaction history.
@@ -1414,6 +1737,7 @@ export default function AdminConsole() {
               )}
             </div>
           </div>
+
         </div>
       ) : null}
 
@@ -1470,6 +1794,31 @@ function MetricCard({ label, value }: { label: string; value: string }) {
   );
 }
 
+function DetailCard({
+  label,
+  value,
+  multiline = false,
+}: {
+  label: string;
+  value: string;
+  multiline?: boolean;
+}) {
+  return (
+    <div className="rounded-2xl bg-white p-4 dark:bg-black">
+      <div className="text-xs uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
+        {label}
+      </div>
+      <div
+        className={`mt-2 text-sm font-medium text-zinc-900 dark:text-zinc-50 ${
+          multiline ? "whitespace-pre-wrap break-words leading-6" : "break-words"
+        }`}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
 function InfoLine({ label, value }: { label: string; value: string }) {
   return (
     <div>
@@ -1479,6 +1828,140 @@ function InfoLine({ label, value }: { label: string; value: string }) {
       <div className="mt-1 font-medium text-zinc-900 dark:text-zinc-50">
         {value}
       </div>
+    </div>
+  );
+}
+
+function VerificationPreview({
+  href,
+  label,
+}: {
+  href: string | null;
+  label: string;
+}) {
+  const { getToken } = useAuth();
+  const [src, setSrc] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
+
+  const proxiedHref = useMemo(() => {
+    if (!href) return null;
+    if (href.startsWith("/api/flask/")) return href;
+    if (href.startsWith("/api/")) return `/api/flask${href.slice(4)}`;
+    if (href.startsWith("/")) return `/api/flask${href}`;
+    return `/api/flask/${href}`;
+  }, [href]);
+
+  useEffect(() => {
+    if (!proxiedHref) {
+      setSrc(null);
+      setError(null);
+      return;
+    }
+    let active = true;
+    let objectUrl: string | null = null;
+
+    const load = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const token = await getToken();
+        const res = await fetch(proxiedHref, {
+          headers: {
+            Authorization: token ? `Bearer ${token}` : "",
+          },
+        });
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        const blob = await res.blob();
+        objectUrl = URL.createObjectURL(blob);
+        if (active) {
+          setSrc(objectUrl);
+        }
+      } catch (e) {
+        if (active) {
+          setError(e instanceof Error ? e.message : String(e));
+          setSrc(null);
+        }
+      } finally {
+        if (active) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void load();
+
+    return () => {
+      active = false;
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [getToken, proxiedHref]);
+
+  if (!proxiedHref) {
+    return null;
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
+        {label}
+      </div>
+      <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950">
+        {src ? (
+          <button type="button" onClick={() => setExpanded(true)} className="block w-full text-left">
+            <img src={src} alt={label} className="h-44 w-full object-cover" />
+          </button>
+        ) : (
+          <div className="flex h-44 items-center justify-center px-3 text-sm text-zinc-500 dark:text-zinc-400">
+            {loading ? "Loading preview..." : error ? `Preview failed: ${error}` : "No preview"}
+          </div>
+        )}
+        {src ? (
+          <div className="flex items-center justify-between gap-2 border-t border-zinc-200 px-3 py-2 text-xs dark:border-zinc-800">
+            <button
+              type="button"
+              onClick={() => setExpanded(true)}
+              className="font-semibold text-zinc-700 hover:text-zinc-950 dark:text-zinc-300 dark:hover:text-white"
+            >
+              Expand
+            </button>
+            <button
+              type="button"
+              onClick={() => window.open(src, "_blank", "noopener,noreferrer")}
+              className="font-semibold text-zinc-700 hover:text-zinc-950 dark:text-zinc-300 dark:hover:text-white"
+            >
+              Open tab
+            </button>
+          </div>
+        ) : null}
+      </div>
+      {expanded && src ? (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/80 p-4"
+          onClick={() => setExpanded(false)}
+          role="presentation"
+        >
+          <div
+            className="relative max-h-[92vh] max-w-[92vw] overflow-hidden rounded-3xl border border-white/20 bg-zinc-950 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+            role="presentation"
+          >
+            <button
+              type="button"
+              onClick={() => setExpanded(false)}
+              className="absolute right-3 top-3 z-10 rounded-full bg-white/10 px-3 py-1.5 text-xs font-semibold text-white backdrop-blur"
+            >
+              Close
+            </button>
+            <img src={src} alt={label} className="max-h-[92vh] max-w-[92vw] object-contain" />
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
