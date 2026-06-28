@@ -11,6 +11,7 @@ type Profile = {
   handle: string | null;
   bio: string | null;
   avatar_url: string | null;
+  phone_number: string | null;
   verified: boolean;
   created_at?: string | null;
   updated_at?: string | null;
@@ -49,6 +50,7 @@ function InstantProfileBridge({
     handle: string;
     bio: string;
     avatar_url: string;
+    phone_number: string;
   }) => void;
 }) {
   if (!hasInstantConfig || !db || !userId) return null;
@@ -74,6 +76,7 @@ function InstantProfileBridgeInner({
     handle: string;
     bio: string;
     avatar_url: string;
+    phone_number: string;
   }) => void;
 }) {
   const instantDb = db as NonNullable<typeof db>;
@@ -101,6 +104,7 @@ function InstantProfileBridgeInner({
       handle: next.handle ?? null,
       bio: next.bio ?? null,
       avatar_url: next.avatar_url ?? null,
+      phone_number: (next as { phone_number?: string | null }).phone_number ?? null,
       verified: !!next.verified,
       created_at:
         typeof next.createdAt === "number"
@@ -121,6 +125,7 @@ function InstantProfileBridgeInner({
       handle: profile.handle ?? "",
       bio: profile.bio ?? "",
       avatar_url: profile.avatar_url ?? "",
+      phone_number: profile.phone_number ?? "",
     });
   }, [onForm, onProfile, profileQuery.data, userId]);
 
@@ -136,6 +141,7 @@ export default function ProfileEditor() {
     handle: "",
     bio: "",
     avatar_url: "",
+    phone_number: "",
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -159,6 +165,7 @@ export default function ProfileEditor() {
         handle: json.handle ?? "",
         bio: json.bio ?? "",
         avatar_url: json.avatar_url ?? "",
+        phone_number: json.phone_number ?? "",
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -283,6 +290,19 @@ export default function ProfileEditor() {
             }
             className="h-10 rounded-lg border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
             placeholder="https://…"
+          />
+        </label>
+
+        <label className="grid gap-1 text-sm text-zinc-700 dark:text-zinc-300">
+          Phone number
+          <input
+            inputMode="tel"
+            value={form.phone_number}
+            onChange={(e) =>
+              setForm((s) => ({ ...s, phone_number: e.target.value }))
+            }
+            className="h-10 rounded-lg border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
+            placeholder="e.g. 08012345678"
           />
         </label>
       </div>

@@ -12,9 +12,13 @@ import {
 } from "lucide-react";
 
 type VerificationStatus = "unsubmitted" | "pending_review" | "approved" | "rejected";
-type DocType = "nin_slip" | "voters_card" | "passport" | "no_id";
-type AgeProofType = "work_id" | "student_card" | "university_id" | "birth_certificate";
+type DocType = "bvn" | "nin_slip" | "voters_card" | "passport";
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+
+type BankOption = {
+  name: string;
+  code: string;
+};
 
 type VerificationResponse = {
   user_id: string;
@@ -23,12 +27,18 @@ type VerificationResponse = {
   verified?: boolean;
   verification_status?: VerificationStatus | null;
   verification_ready?: boolean | null;
+  phone_number?: string | null;
   id_document_type?: DocType | null;
-  age_proof_type?: AgeProofType | null;
   document_url?: string | null;
-  age_proof_url?: string | null;
   selfie_url?: string | null;
   verification_notes?: string | null;
+  bank_validation_status?: string | null;
+  bank_name?: string | null;
+  bank_code?: string | null;
+  bank_account_number?: string | null;
+  bank_account_name?: string | null;
+  bank_validation_checked_at?: number | string | null;
+  bvn_number?: string | null;
   verification_submitted_at?: number | string | null;
   verification_reviewed_at?: number | string | null;
 };
@@ -53,28 +63,16 @@ function formatIso(value: string | number | null | undefined) {
 
 function docLabel(type: DocType) {
   switch (type) {
+    case "bvn":
+      return "BVN";
     case "nin_slip":
       return "NIN slip";
     case "voters_card":
       return "Voter's card";
     case "passport":
       return "Passport";
-    case "no_id":
-      return "No ID";
   }
-}
-
-function ageProofLabel(type: AgeProofType) {
-  switch (type) {
-    case "work_id":
-      return "Work ID";
-    case "student_card":
-      return "Student card";
-    case "university_id":
-      return "University ID";
-    case "birth_certificate":
-      return "Birth certificate";
-  }
+  return "Document";
 }
 
 function statusLabel(status: VerificationStatus | null | undefined) {
@@ -95,10 +93,16 @@ export default function VerificationPanel() {
   const [data, setData] = useState<VerificationResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [docType, setDocType] = useState<DocType>("nin_slip");
-  const [ageProofType, setAgeProofType] = useState<AgeProofType>("birth_certificate");
+  const [docType, setDocType] = useState<DocType>("bvn");
+  const [phoneNumber, setPhoneNumber] = useState("");
+  const [bvn, setBvn] = useState("");
+  const [bankOptions, setBankOptions] = useState<BankOption[]>([]);
+  const [bankSearch, setBankSearch] = useState("");
+  const [bankName, setBankName] = useState("");
+  const [bankCode, setBankCode] = useState("");
+  const [bankAccountNumber, setBankAccountNumber] = useState("");
+  const [bankAccountName, setBankAccountName] = useState("");
   const [documentFile, setDocumentFile] = useState<File | null>(null);
-  const [ageProofFile, setAgeProofFile] = useState<File | null>(null);
   const [selfieFile, setSelfieFile] = useState<File | null>(null);
   const [selfiePreviewUrl, setSelfiePreviewUrl] = useState<string | null>(null);
   const [cameraOn, setCameraOn] = useState(false);
@@ -114,14 +118,28 @@ export default function VerificationPanel() {
     setError(null);
     try {
       const token = await getToken();
-      const res = await fetch("/api/flask/me/verification", {
-        headers: { Authorization: token ? `Bearer ${token}` : "" },
-      });
-      const json = (await readJson(res)) as VerificationResponse;
-      if (!res.ok) throw new Error((json as { error?: string })?.error || `HTTP ${res.status}`);
+      const [verificationRes, banksRes] = await Promise.all([
+        fetch("/api/flask/me/verification", {
+          headers: { Authorization: token ? `Bearer ${token}` : "" },
+        }),
+        fetch("/api/flask/paystack/banks", {
+          headers: { Authorization: token ? `Bearer ${token}` : "" },
+        }),
+      ]);
+      const json = (await readJson(verificationRes)) as VerificationResponse;
+      const banksJson = (await readJson(banksRes)) as { banks?: BankOption[] };
+      if (!verificationRes.ok) throw new Error((json as { error?: string })?.error || `HTTP ${verificationRes.status}`);
+      if (!banksRes.ok) throw new Error((banksJson as { error?: string })?.error || `HTTP ${banksRes.status}`);
+      const nextBanks = (banksJson.banks ?? []).filter((bank) => bank?.name && bank?.code);
       setData(json);
-      setDocType(json.id_document_type ?? "nin_slip");
-      setAgeProofType(json.age_proof_type ?? "birth_certificate");
+      setBankOptions(nextBanks);
+      setDocType(json.id_document_type ?? "bvn");
+      setPhoneNumber(json.phone_number ?? "");
+      setBvn(json.bvn_number ?? "");
+      setBankName(json.bank_name ?? nextBanks[0]?.name ?? "");
+      setBankCode(json.bank_code ?? nextBanks[0]?.code ?? "");
+      setBankAccountNumber(json.bank_account_number ?? "");
+      setBankAccountName(json.bank_account_name ?? "");
       setStep(json.verification_status === "approved" ? 3 : json.verification_status === "pending_review" ? 2 : 0);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -219,18 +237,50 @@ export default function VerificationPanel() {
 
   const status = data?.verification_status ?? "unsubmitted";
   const approved = status === "approved" || !!data?.verified;
-  const needsAgeProof = docType === "no_id";
+  const needsBvn = docType === "bvn";
+  const selectedBank = useMemo(
+    () => bankOptions.find((bank) => bank.name === bankName || bank.code === bankCode) ?? null,
+    [bankCode, bankName, bankOptions],
+  );
+  const filteredBanks = useMemo(() => {
+    const term = bankSearch.trim().toLowerCase();
+    if (!term) return bankOptions;
+    return bankOptions.filter((bank) => bank.name.toLowerCase().includes(term) || bank.code.toLowerCase().includes(term));
+  }, [bankOptions, bankSearch]);
   const steps = useMemo(
     () => [
-      { title: needsAgeProof ? "Age proof" : "Document", done: needsAgeProof ? !!ageProofFile || !!data?.age_proof_url : !!documentFile || !!data?.document_url },
+      { title: "Phone", done: !!phoneNumber || !!data?.phone_number },
+      {
+        title: needsBvn ? "BVN + Bank" : "Document",
+        done: needsBvn
+          ? !!bvn && !!bankName && !!bankAccountNumber && !!bankAccountName
+          : !!documentFile || !!data?.document_url,
+      },
       { title: "Photo", done: !!selfieFile || !!data?.selfie_url },
       { title: "Review", done: approved || status === "pending_review" },
       { title: "Approved", done: approved },
     ],
-    [approved, ageProofFile, data?.age_proof_url, data?.document_url, data?.selfie_url, documentFile, needsAgeProof, selfieFile, status],
+    [
+      approved,
+      data?.document_url,
+      data?.selfie_url,
+      data?.phone_number,
+      documentFile,
+      needsBvn,
+      selfieFile,
+      status,
+      phoneNumber,
+      bvn,
+      bankAccountName,
+      bankAccountNumber,
+      bankName,
+    ],
   );
 
-  const canSubmit = !!selfieFile && (needsAgeProof ? !!ageProofFile : !!documentFile);
+  const canSubmit =
+    !!phoneNumber &&
+    !!selfieFile &&
+    (needsBvn ? !!bvn && !!bankName && !!bankAccountNumber && !!bankAccountName : !!documentFile);
 
   const validateUpload = useCallback(
     (file: File | null, kind: "document" | "age proof") => {
@@ -255,10 +305,14 @@ export default function VerificationPanel() {
       const token = await getToken();
       const form = new FormData();
       form.set("document_type", docType);
+      form.set("phone_number", phoneNumber);
       form.set("selfie_image", selfieFile as File);
-      if (needsAgeProof) {
-        form.set("age_proof_type", ageProofType);
-        form.set("age_proof_image", ageProofFile as File);
+      if (needsBvn) {
+        form.set("bvn", bvn);
+        form.set("bank_name", bankName);
+        form.set("bank_code", bankCode || selectedBank?.code || "");
+        form.set("bank_account_number", bankAccountNumber);
+        form.set("bank_account_name", bankAccountName);
       } else {
         form.set("document_image", documentFile as File);
       }
@@ -270,7 +324,7 @@ export default function VerificationPanel() {
       const json = await readJson(res);
       if (!res.ok) throw new Error((json as { error?: string })?.error || `HTTP ${res.status}`);
       setData(json as VerificationResponse);
-      setStep(2);
+      setStep(json.verification_status === "approved" ? 3 : 2);
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -283,10 +337,12 @@ export default function VerificationPanel() {
     <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-black sm:p-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">Verification</div>
-          <div className="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-            Submit one document, a live selfie, and we will review it manually before withdrawals are enabled.
-          </div>
+              <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">Verification</div>
+              <div className="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+                Submit your BVN, supported bank details and a live selfie. If
+                the bank lookup matches, verification auto-approves and no admin
+                review is needed.
+              </div>
         </div>
         <button
           type="button"
@@ -345,15 +401,15 @@ export default function VerificationPanel() {
                     ? "Your verification is approved. Withdrawals are enabled."
                     : status === "pending_review"
                       ? "Your documents are waiting for admin review."
-                      : "Upload your document and live selfie to submit for review."}
+                      : "Submit your BVN, bank details and live selfie. Matching bank records auto-approve without admin review."}
                 </div>
               </div>
             </div>
-            <div className="mt-4 flex flex-wrap gap-2">
-              <span className="rounded-full border border-zinc-200 px-4 py-2 text-xs font-semibold text-zinc-600 dark:border-zinc-800 dark:text-zinc-400">
-                Manual review
-              </span>
-              <span className="rounded-full border border-zinc-200 px-4 py-2 text-xs font-semibold text-zinc-600 dark:border-zinc-800 dark:text-zinc-400">
+              <div className="mt-4 flex flex-wrap gap-2">
+                <span className="rounded-full border border-zinc-200 px-4 py-2 text-xs font-semibold text-zinc-600 dark:border-zinc-800 dark:text-zinc-400">
+                BVN auto-approve
+                </span>
+                <span className="rounded-full border border-zinc-200 px-4 py-2 text-xs font-semibold text-zinc-600 dark:border-zinc-800 dark:text-zinc-400">
                 Name: {data?.display_name || data?.handle || "—"}
               </span>
             </div>
@@ -362,7 +418,7 @@ export default function VerificationPanel() {
           <div className="rounded-2xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-black">
             <div className="flex items-center gap-2 text-sm font-semibold text-zinc-900 dark:text-zinc-50">
               <UploadCloudIcon className="size-4" />
-              Upload documents
+              Verification details
             </div>
             <div className="mt-4 grid gap-4">
               <label className="grid gap-2 text-sm text-zinc-700 dark:text-zinc-300">
@@ -373,61 +429,141 @@ export default function VerificationPanel() {
                     const next = e.target.value as DocType;
                     setDocType(next);
                     setDocumentFile(null);
-                    setAgeProofFile(null);
+                    setBvn("");
+                    setBankSearch("");
+                    setBankName(bankOptions[0]?.name ?? "");
+                    setBankCode(bankOptions[0]?.code ?? "");
+                    setBankAccountNumber("");
+                    setBankAccountName("");
                   }}
                   className="h-11 rounded-xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
                 >
                   <option value="nin_slip">NIN slip</option>
                   <option value="voters_card">Voter&apos;s card</option>
                   <option value="passport">Passport</option>
-                  <option value="no_id">No ID</option>
+                  <option value="bvn">BVN</option>
                 </select>
               </label>
 
-              {needsAgeProof ? (
-                <label className="grid gap-2 text-sm text-zinc-700 dark:text-zinc-300">
-                  Age proof type
-                  <select
-                    value={ageProofType}
-                    onChange={(e) => setAgeProofType(e.target.value as AgeProofType)}
-                    className="h-11 rounded-xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
-                  >
-                    <option value="work_id">Work ID</option>
-                    <option value="student_card">Student card</option>
-                    <option value="university_id">University ID</option>
-                    <option value="birth_certificate">Birth certificate</option>
-                  </select>
-                </label>
-              ) : null}
-
               <label className="grid gap-2 text-sm text-zinc-700 dark:text-zinc-300">
-                {needsAgeProof ? `Upload ${ageProofLabel(ageProofType)}` : `Picture of ${docLabel(docType)}`}
+                Phone number
                 <input
-                  type="file"
-                  accept="image/*"
-                  capture="environment"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0] ?? null;
-                    const nextFile = validateUpload(file, needsAgeProof ? "age proof" : "document");
-                    if (nextFile) {
-                      setError(null);
-                    }
-                    if (needsAgeProof) setAgeProofFile(nextFile);
-                    else setDocumentFile(nextFile);
-                  }}
-                  className="block w-full rounded-xl border border-dashed border-zinc-300 bg-zinc-50 px-3 py-3 text-sm text-zinc-700 file:mr-4 file:rounded-full file:border-0 file:bg-zinc-950 file:px-4 file:py-2 file:text-sm file:font-medium file:text-white dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:file:bg-zinc-100 dark:file:text-zinc-950"
+                  inputMode="tel"
+                  value={phoneNumber}
+                  onChange={(e) => setPhoneNumber(e.target.value)}
+                  className="h-11 rounded-xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
+                  placeholder="e.g. 08012345678"
                 />
-                <span className="text-xs text-zinc-500 dark:text-zinc-400">
-                  {needsAgeProof
-                    ? ageProofFile
-                      ? ageProofFile.name
-                      : "Capture a clear photo of the proof."
-                  : documentFile
-                    ? documentFile.name
-                    : "Capture a clear photo of the document."}
-                </span>
-                <span className="text-[11px] text-zinc-400 dark:text-zinc-500">Max 5MB.</span>
               </label>
+
+              {needsBvn ? (
+                <>
+                  <label className="grid gap-2 text-sm text-zinc-700 dark:text-zinc-300">
+                    BVN
+                    <input
+                      inputMode="numeric"
+                      value={bvn}
+                      onChange={(e) => setBvn(e.target.value)}
+                      className="h-11 rounded-xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
+                      placeholder="11 digit BVN"
+                    />
+                  </label>
+                  <label className="grid gap-2 text-sm text-zinc-700 dark:text-zinc-300">
+                    Bank search
+                    <input
+                      value={bankSearch}
+                      onChange={(e) => setBankSearch(e.target.value)}
+                      className="h-11 rounded-xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
+                      placeholder="Search bank name"
+                    />
+                  </label>
+                  <label className="grid gap-2 text-sm text-zinc-700 dark:text-zinc-300">
+                    Bank name
+                    <div className="max-h-48 overflow-auto rounded-xl border border-zinc-200 dark:border-zinc-800">
+                      {filteredBanks.length ? (
+                        <div className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                          {filteredBanks.map((bank) => {
+                            const active = bank.name === bankName;
+                            return (
+                              <button
+                                type="button"
+                                key={bank.code}
+                                onClick={() => {
+                                  setBankName(bank.name);
+                                  setBankCode(bank.code);
+                                  setBankSearch(bank.name);
+                                }}
+                                className={`flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm transition-colors ${
+                                  active
+                                    ? "bg-zinc-950 text-white dark:bg-zinc-100 dark:text-zinc-950"
+                                    : "bg-white text-zinc-800 hover:bg-zinc-50 dark:bg-black dark:text-zinc-200 dark:hover:bg-zinc-900"
+                                }`}
+                              >
+                                <span className="min-w-0 truncate">{bank.name}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <div className="px-4 py-3 text-sm text-zinc-500 dark:text-zinc-400">
+                          No banks matched your search.
+                        </div>
+                      )}
+                    </div>
+                    <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
+                      Selected: {selectedBank ? selectedBank.name : "—"}
+                    </div>
+                  </label>
+                  <label className="grid gap-2 text-sm text-zinc-700 dark:text-zinc-300">
+                    Account number
+                    <input
+                      inputMode="numeric"
+                      value={bankAccountNumber}
+                      onChange={(e) => setBankAccountNumber(e.target.value)}
+                      className="h-11 rounded-xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
+                      placeholder="0123456789"
+                    />
+                  </label>
+                  <label className="grid gap-2 text-sm text-zinc-700 dark:text-zinc-300">
+                    Account name
+                    <input
+                      value={bankAccountName}
+                      onChange={(e) => setBankAccountName(e.target.value)}
+                      className="h-11 rounded-xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
+                      placeholder="Name on the bank account"
+                    />
+                  </label>
+                </>
+              ) : (
+                <label className="grid gap-2 text-sm text-zinc-700 dark:text-zinc-300">
+                  Picture of {docLabel(docType)}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0] ?? null;
+                      const nextFile = validateUpload(file, "document");
+                      if (nextFile) {
+                        setError(null);
+                      }
+                      setDocumentFile(nextFile);
+                    }}
+                    className="block w-full rounded-xl border border-dashed border-zinc-300 bg-zinc-50 px-3 py-3 text-sm text-zinc-700 file:mr-4 file:rounded-full file:border-0 file:bg-zinc-950 file:px-4 file:py-2 file:text-sm file:font-medium file:text-white dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:file:bg-zinc-100 dark:file:text-zinc-950"
+                  />
+                  <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                    {documentFile ? documentFile.name : "Capture a clear photo of the document."}
+                  </span>
+                  <span className="text-[11px] text-zinc-400 dark:text-zinc-500">Max 5MB.</span>
+                </label>
+              )}
+              {needsBvn ? (
+              <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-4 text-xs leading-5 text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
+                BVN verification can auto-approve when your bank name, account
+                number and account name match Paystack records. Withdrawals still
+                require the withdrawal account to match your verified name.
+              </div>
+              ) : null}
 
               <label className="grid gap-2 text-sm text-zinc-700 dark:text-zinc-300">
                 Live selfie
@@ -504,11 +640,6 @@ export default function VerificationPanel() {
                 </div>
               ) : null}
 
-              <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-4 text-xs leading-5 text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
-                Withdrawals are blocked until an admin approves this submission.
-                The account name on withdrawal must match at least two parts of
-                your profile name.
-              </div>
             </div>
           </div>
 
@@ -540,12 +671,6 @@ export default function VerificationPanel() {
                 </span>
               </div>
               <div className="flex items-center justify-between gap-3">
-                <span>Age proof</span>
-                <span className="font-medium text-zinc-900 dark:text-zinc-50">
-                  {data?.age_proof_type ? ageProofLabel(data.age_proof_type) : "—"}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
                 <span>Submitted</span>
                 <span className="font-medium text-zinc-900 dark:text-zinc-50">
                   {formatIso(data?.verification_submitted_at)}
@@ -564,15 +689,21 @@ export default function VerificationPanel() {
                 </span>
               </div>
               <div className="flex items-center justify-between gap-3">
-                <span>Age proof file</span>
-                <span className="font-medium text-zinc-900 dark:text-zinc-50">
-                  {data?.age_proof_url ? "Available" : "—"}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
                 <span>Selfie file</span>
                 <span className="font-medium text-zinc-900 dark:text-zinc-50">
                   {data?.selfie_url ? "Available" : "—"}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <span>Bank validation</span>
+                <span className="font-medium text-zinc-900 dark:text-zinc-50">
+                  {data?.bank_validation_status || "—"}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <span>Bank account</span>
+                <span className="font-medium text-zinc-900 dark:text-zinc-50">
+                  {data?.bank_account_name || data?.bank_account_number || "—"}
                 </span>
               </div>
             </div>
@@ -585,9 +716,9 @@ export default function VerificationPanel() {
             <div className="mt-2 text-sm leading-6 text-zinc-600 dark:text-zinc-400">
               {data?.verification_notes || "No notes yet."}
             </div>
-            <div className="mt-4 flex items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs font-medium text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
+              <div className="mt-4 flex items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs font-medium text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
               <ChevronLeftIcon className="size-4" />
-              Manual review required before withdrawals
+              BVN + bank match skips admin review
               <ChevronRightIcon className="size-4" />
             </div>
           </div>

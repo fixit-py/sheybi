@@ -166,11 +166,14 @@ export default function TermsPage() {
         <div className="mt-6 grid gap-5 text-sm leading-6 text-zinc-700 dark:text-zinc-300">
           <Section title="1. The service">
             Sheybi is a prediction market platform where users can buy and sell positions on market outcomes while a
-            market is open. Prices may change as other users trade and as market conditions change.
+            market is open. Prices may change as users trade, as market conditions change, and as available liquidity
+            changes over time.
           </Section>
           <Section title="2. Eligibility">
             You must be at least 18 years old to use Sheybi. You agree that the details you provide are accurate,
-            current, and belong to you. You may not use automated means, bots, or scripts to access the service.
+            current, and belong to you. You may not use automated means, bots, or scripts to access the service. You
+            are responsible for keeping your account information current, including your name, phone number, email,
+            and withdrawal details.
           </Section>
           <Section title="3. Trading risk">
             Trading on Sheybi involves financial risk. You may lose some or all of the amount you use to trade. Market
@@ -179,24 +182,43 @@ export default function TermsPage() {
           <Section title="4. Fees and pricing">
             We charge a 0.5% buy fee. Sell fees and resolution fees are dynamic and may change based on market
             conditions. Spreads are embedded in quoted prices. You are responsible for reviewing the displayed amount
-            before you confirm a trade or withdrawal.
+            before you confirm a trade or withdrawal. Fee schedules, pricing logic, and risk controls may change from
+            time to time without prior notice where needed to protect the platform or comply with law.
           </Section>
           <Section title="5. Wallet and withdrawals">
-            Wallet balances are currently dummy NGN for testing and product evaluation. Withdrawals are queued for
-            manual review. A withdrawal request deducts the requested amount immediately, and if the request is
-            rejected the amount is returned to your wallet.
+            Wallet balances are denominated in NGN. Deposits are processed through our payment provider, and
+            withdrawals are processed through our payout provider or a manual review queue where necessary. A
+            withdrawal request deducts the requested amount immediately, but only the portion of your balance that is
+            older than the cooling-off period is withdrawable. If a withdrawal is rejected, the deducted amount is
+            returned to your wallet.
           </Section>
           <Section title="6. Verification">
-            Verification may be required before withdrawals can be processed. Depending on the account, you may be
-            asked to provide a selfie, a government-issued ID, or proof of age. We may refuse or delay withdrawals if
-            verification is incomplete or fails review.
+            Verification is required before withdrawals can be processed. Depending on your account and the available
+            verification paths, you may be asked to provide a live selfie, a BVN, bank account details, a
+            government-issued ID, or proof of age. We may refuse, delay, or reverse withdrawals if verification is
+            incomplete, inconsistent, or fails review.
           </Section>
           <Section title="7. Account use">
             You are responsible for keeping your account secure and for all activity that occurs under your account.
-            We may suspend, restrict, or close accounts where we believe there is misuse, fraud, abuse, or a violation
-            of these terms.
+            We may suspend, restrict, or close accounts where we believe there is misuse, fraud, abuse, chargeback
+            risk, or a violation of these terms.
           </Section>
-          <Section title="8. No guarantees">
+          <Section title="8. Deposits and withdrawal controls">
+            Newly deposited funds may be subject to a cooling-off period before they become withdrawable. Older funds
+            remain withdrawable as they age out of the cooling period. We may also apply velocity checks, risk review,
+            withdrawal limits, and manual review for unusual activity or high-value requests.
+          </Section>
+          <Section title="9. Third-party services">
+            We use third-party providers for authentication, payment processing, bank list retrieval, identity checks,
+            and payout processing. Those providers may have their own terms, limitations, and processing delays. We are
+            not responsible for downtime or actions taken by those providers outside our control.
+          </Section>
+          <Section title="10. Records and compliance">
+            We may keep records of deposits, withdrawals, verification results, device information, IP addresses, and
+            risk signals for compliance, fraud prevention, dispute handling, and support. By using the service, you
+            consent to those records being collected and retained as needed for those purposes.
+          </Section>
+          <Section title="11. No guarantees">
             We do not guarantee profits, uninterrupted access, or any particular market outcome. The service is
             provided on an as-is basis, subject to availability and applicable laws.
           </Section>
@@ -210,8 +232,8 @@ export default function TermsPage() {
 
         <div className="mt-6 border-t border-zinc-200 pt-5 dark:border-zinc-800">
           <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-            By accepting, you confirm that you understand the trading rules, fee structure, risk disclosures, and
-            verification requirements.
+            By accepting, you confirm that you understand the trading rules, fee structure, deposit cooling-off rules,
+            verification requirements, and withdrawal controls.
           </p>
           <button
             type="button"

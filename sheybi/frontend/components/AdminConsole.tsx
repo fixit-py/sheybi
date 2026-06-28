@@ -89,12 +89,28 @@ type AdminTransaction = {
   display_name: string | null;
 };
 
+type AdminDepositItem = {
+  id: string;
+  reference: string | null;
+  amount: number;
+  status: string | null;
+  paystack_status: string | null;
+  gateway_response: string | null;
+  paid_at: number | string | null;
+  created_at: number | string | null;
+  updated_at: number | string | null;
+};
+
 type AdminUser = {
   user_id: string;
   display_name: string | null;
   handle: string | null;
   bio: string | null;
   avatar_url: string | null;
+  email: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  phone_number: string | null;
   verified: boolean;
   verification_status: string | null;
   verification_ready: boolean;
@@ -109,6 +125,18 @@ type AdminUser = {
   age_proof_url: string | null;
   selfie_image_path: string | null;
   selfie_url: string | null;
+  bank_validation_status: string | null;
+  bank_name: string | null;
+  bank_code: string | null;
+  bank_account_number: string | null;
+  bank_account_name: string | null;
+  bank_validation_checked_at: number | string | null;
+  bvn_number: string | null;
+  verified_name: string | null;
+  verified_bank_account: string | null;
+  verification_reference: string | null;
+  paystack_customer_code: string | null;
+  withdrawal_cooldown_until: number | string | null;
   verification_notes: string | null;
   verification_submitted_at: number | string | null;
   verification_reviewed_at: number | string | null;
@@ -117,6 +145,7 @@ type AdminUser = {
   created_at: number | string | null;
   updated_at: number | string | null;
   withdrawals: AdminWithdrawalItem[];
+  deposits: AdminDepositItem[];
   transactions: AdminTransaction[];
 };
 
@@ -133,6 +162,7 @@ type AdminVerificationItem = {
   verification_status: string | null;
   verified: boolean;
   id_document_type: string | null;
+  bvn_number: string | null;
   document_url: string | null;
   age_proof_url: string | null;
   selfie_url: string | null;
@@ -146,9 +176,25 @@ type AdminWithdrawalItem = {
   user_id: string | null;
   amount: number;
   status: string | null;
+  review_level?: string | null;
+  risk_score?: number | string | null;
+  risk_flags?: string[] | string | null;
   bank_name: string | null;
   account_name: string | null;
   account_number: string | null;
+  verified_name?: string | null;
+  verified_bank_account?: string | null;
+  bank_validation_status?: string | null;
+  verification_reference?: string | null;
+  paystack_customer_code?: string | null;
+  daily_deposit_count?: number | string | null;
+  daily_deposit_volume?: number | string | null;
+  daily_withdrawal_count?: number | string | null;
+  daily_withdrawal_volume?: number | string | null;
+  cooldown_until?: number | string | null;
+  transfer_status?: string | null;
+  transfer_reference?: string | null;
+  recipient_code?: string | null;
   note: string | null;
   created_at: number | string | null;
   updated_at: number | string | null;
@@ -437,6 +483,7 @@ export default function AdminConsole() {
     [selectedUserId, users],
   );
   const selectedUserWithdrawals = useMemo(() => selectedUser?.withdrawals ?? [], [selectedUser]);
+  const selectedUserDeposits = useMemo(() => selectedUser?.deposits ?? [], [selectedUser]);
   const selectedMarket = useMemo(
     () => openMarkets.find((market) => market.id === selectedMarketId) ?? openMarkets[0] ?? null,
     [openMarkets, selectedMarketId],
@@ -805,6 +852,7 @@ export default function AdminConsole() {
                     </div>
                       <div className="mt-3 grid grid-cols-2 gap-3 text-xs text-zinc-600 dark:text-zinc-300">
                         <span>Document: {item.id_document_type || "—"}</span>
+                        <span>BVN: {item.bvn_number ? `${String(item.bvn_number).slice(0, 3)}••••${String(item.bvn_number).slice(-2)}` : "—"}</span>
                         <span>Submitted: {formatIso(item.submitted_at)}</span>
                         <span>Reviewed: {formatIso(item.reviewed_at)}</span>
                         <span>Verified: {item.verified ? "Yes" : "No"}</span>
@@ -862,6 +910,26 @@ export default function AdminConsole() {
                         <div className="text-xs text-zinc-500 dark:text-zinc-400">
                           {item.account_number || "—"} · {item.user_id || "—"}
                         </div>
+                        <div className="mt-2 flex flex-wrap gap-2 text-[11px] uppercase tracking-[0.16em] text-zinc-500 dark:text-zinc-400">
+                          <span className="rounded-full border border-zinc-200 px-2 py-1 dark:border-zinc-800">
+                            {item.review_level || "manual"}
+                          </span>
+                          {item.risk_score != null ? (
+                            <span className="rounded-full border border-zinc-200 px-2 py-1 dark:border-zinc-800">
+                              Risk {Number(item.risk_score)}
+                            </span>
+                          ) : null}
+                          {item.cooldown_until ? (
+                            <span className="rounded-full border border-zinc-200 px-2 py-1 dark:border-zinc-800">
+                              Cooling off
+                            </span>
+                          ) : null}
+                          {item.transfer_status ? (
+                            <span className="rounded-full border border-zinc-200 px-2 py-1 dark:border-zinc-800">
+                              Transfer {item.transfer_status}
+                            </span>
+                          ) : null}
+                        </div>
                       </div>
                       <div className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-zinc-700 dark:bg-zinc-950 dark:text-zinc-300">
                         {item.status || "pending"}
@@ -870,6 +938,11 @@ export default function AdminConsole() {
                     <div className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
                       {formatIso(item.created_at)}
                     </div>
+                    {item.transfer_reference ? (
+                      <div className="mt-1 text-[11px] text-zinc-400 dark:text-zinc-500">
+                        Ref {item.transfer_reference}
+                      </div>
+                    ) : null}
                     <div className="mt-3 flex flex-wrap gap-2">
                       <button
                         type="button"
@@ -1617,8 +1690,21 @@ export default function AdminConsole() {
                     <div className="grid gap-3 sm:grid-cols-2">
                       <DetailCard label="Display name" value={selectedUser.display_name || "—"} />
                       <DetailCard label="Handle" value={selectedUser.handle ? `@${selectedUser.handle}` : "—"} />
+                      <DetailCard label="Email" value={selectedUser.email || "—"} />
+                      <DetailCard label="First name" value={selectedUser.first_name || "—"} />
+                      <DetailCard label="Last name" value={selectedUser.last_name || "—"} />
+                      <DetailCard label="Phone" value={selectedUser.phone_number || "—"} />
                       <DetailCard label="Bio" value={selectedUser.bio || "—"} multiline />
                       <DetailCard label="Avatar URL" value={selectedUser.avatar_url || "—"} multiline />
+                      <DetailCard label="Paystack customer" value={selectedUser.paystack_customer_code || "—"} />
+                      <DetailCard label="Verification ref" value={selectedUser.verification_reference || "—"} />
+                      <DetailCard label="BVN" value={selectedUser.bvn_number ? `${String(selectedUser.bvn_number).slice(0, 3)}••••${String(selectedUser.bvn_number).slice(-2)}` : "—"} />
+                      <DetailCard label="Verified name" value={selectedUser.verified_name || "—"} />
+                      <DetailCard label="Verified bank" value={selectedUser.verified_bank_account || "—"} multiline />
+                      <DetailCard label="Bank validation" value={selectedUser.bank_validation_status || "—"} />
+                      <DetailCard label="Bank account" value={`${selectedUser.bank_name || "—"} · ${selectedUser.bank_account_number || "—"}`} multiline />
+                      <DetailCard label="Bank account name" value={selectedUser.bank_account_name || "—"} />
+                      <DetailCard label="Cooldown until" value={formatIso(selectedUser.withdrawal_cooldown_until)} />
                       <DetailCard label="Verification notes" value={selectedUser.verification_notes || "—"} multiline />
                       <DetailCard label="ID document type" value={selectedUser.id_document_type || "—"} />
                       <DetailCard label="Age proof type" value={selectedUser.age_proof_type || "—"} />
@@ -1680,6 +1766,51 @@ export default function AdminConsole() {
                       ) : (
                         <div className="rounded-2xl border border-dashed border-zinc-200 bg-white p-4 text-sm text-zinc-600 dark:border-zinc-800 dark:bg-black dark:text-zinc-400">
                           No withdrawal requests for this user.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-900">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+                          Deposits
+                        </div>
+                        <div className="text-xs text-zinc-500 dark:text-zinc-400">
+                          {selectedUserDeposits.length} request{selectedUserDeposits.length === 1 ? "" : "s"} on file
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mt-3 grid gap-3">
+                      {selectedUserDeposits.length ? (
+                        selectedUserDeposits.map((item) => (
+                          <div key={item.id} className="rounded-2xl bg-white p-4 dark:bg-black">
+                            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                              <div>
+                                <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+                                  {money(item.amount)}
+                                </div>
+                                <div className="text-xs text-zinc-500 dark:text-zinc-400">
+                                  {item.reference || "Reference missing"}
+                                </div>
+                                <div className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                                  {formatIso(item.created_at)}
+                                </div>
+                              </div>
+                              <div className="rounded-full bg-zinc-50 px-3 py-1 text-xs font-semibold text-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
+                                {item.status || "pending"}
+                              </div>
+                            </div>
+                            <div className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+                              {item.paystack_status ? `Paystack: ${item.paystack_status}` : null}
+                              {item.gateway_response ? ` ${item.gateway_response}` : null}
+                            </div>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="rounded-2xl border border-dashed border-zinc-200 bg-white p-4 text-sm text-zinc-600 dark:border-zinc-800 dark:bg-black dark:text-zinc-400">
+                          No deposits for this user.
                         </div>
                       )}
                     </div>

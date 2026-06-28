@@ -5,6 +5,14 @@ import math
 import sys
 import re
 import uuid
+from pathlib import Path
+import base64
+import hashlib
+import hmac
+import json as jsonlib
+from urllib import error as urlerror
+from urllib import request as urlrequest
+from urllib.parse import quote
 from threading import Lock
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -21,6 +29,34 @@ os.environ.setdefault("ADMIN_USER_IDS", "dev_admin")
 DEFAULT_RESERVE = float(os.getenv("PLATFORM_RESERVE_NGN", "10000000"))
 MAX_VERIFICATION_UPLOAD_BYTES = 5 * 1024 * 1024
 TERMS_VERSION = "2026-06-11-v1"
+PAYSTACK_API_BASE = "https://api.paystack.co"
+PAYSTACK_NIGERIA_BANKS: list[dict[str, str]] = [
+    {"name": "Access Bank", "code": "044"},
+    {"name": "Citibank Nigeria", "code": "023"},
+    {"name": "Ecobank Nigeria", "code": "050"},
+    {"name": "Fidelity Bank", "code": "070"},
+    {"name": "First Bank of Nigeria", "code": "011"},
+    {"name": "First City Monument Bank", "code": "214"},
+    {"name": "Globus Bank", "code": "00103"},
+    {"name": "Guaranty Trust Bank", "code": "058"},
+    {"name": "Heritage Bank", "code": "030"},
+    {"name": "Jaiz Bank", "code": "301"},
+    {"name": "Keystone Bank", "code": "082"},
+    {"name": "Opay", "code": "305"},
+    {"name": "Palmpay", "code": "100033"},
+    {"name": "Parallex Bank", "code": "104"},
+    {"name": "Polaris Bank", "code": "076"},
+    {"name": "Providus Bank", "code": "101"},
+    {"name": "Stanbic IBTC Bank", "code": "221"},
+    {"name": "Standard Chartered Bank", "code": "068"},
+    {"name": "Sterling Bank", "code": "232"},
+    {"name": "Taj Bank", "code": "302"},
+    {"name": "Union Bank of Nigeria", "code": "032"},
+    {"name": "United Bank for Africa", "code": "033"},
+    {"name": "Unity Bank", "code": "215"},
+    {"name": "Wema Bank", "code": "035"},
+    {"name": "Zenith Bank", "code": "057"},
+]
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -61,6 +97,71 @@ def create_app() -> Flask:
 
     def now_ms() -> int:
         return int(now_utc().timestamp() * 1000)
+
+    def _to_ms(value: Any) -> int:
+        if value is None:
+            return 0
+        if isinstance(value, (int, float)):
+            return int(value)
+        text = str(value).strip()
+        if not text:
+            return 0
+        try:
+            return int(float(text))
+        except Exception:
+            try:
+                return int(parse_dt(text).timestamp() * 1000)
+            except Exception:
+                return 0
+
+    paystack_bank_cache_path = Path(__file__).resolve().parent / ".cache" / "paystack_banks.json"
+    paystack_bank_cache_lock = Lock()
+    paystack_bank_cache_ttl_ms = 24 * 60 * 60 * 1000
+    paystack_bank_cache_version = 2
+
+    def _clean_bank_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        banks: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or row.get("bank_name") or "").strip()
+            code = str(row.get("code") or row.get("bank_code") or "").strip()
+            if not name or not code:
+                continue
+            key = (name.lower(), code)
+            if key in seen:
+                continue
+            seen.add(key)
+            item = dict(row)
+            item["name"] = name
+            item["code"] = code
+            banks.append(item)
+        banks.sort(key=lambda item: str(item.get("name") or "").lower())
+        return banks
+
+    def _read_cached_bank_list() -> tuple[list[dict[str, Any]], int]:
+        try:
+            if not paystack_bank_cache_path.exists():
+                return [], 0
+            data = jsonlib.loads(paystack_bank_cache_path.read_text(encoding="utf-8"))
+            if int(data.get("version") or 0) != paystack_bank_cache_version:
+                return [], 0
+            fetched_at = int(float(data.get("fetched_at") or 0))
+            banks = data.get("banks")
+            bank_rows = _clean_bank_rows([item for item in banks if isinstance(item, dict)]) if isinstance(banks, list) else []
+            return bank_rows, fetched_at
+        except Exception:
+            return [], 0
+
+    def _write_cached_bank_list(rows: list[dict[str, Any]]) -> None:
+        paystack_bank_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": paystack_bank_cache_version,
+            "fetched_at": now_ms(),
+            "banks": rows,
+        }
+        paystack_bank_cache_path.write_text(jsonlib.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
     def _as_list(value: Any) -> list[dict[str, Any]]:
         if isinstance(value, list):
@@ -131,6 +232,8 @@ def create_app() -> Flask:
             return {
                 "user_id": user_id,
                 "wallet_balance": 100000.0,
+                "withdrawable_balance": 100000.0,
+                "cooling_deposit_balance": 0.0,
                 "currency": "NGN",
                 "verification_status": "unsubmitted",
                 "verification_ready": False,
@@ -142,15 +245,23 @@ def create_app() -> Flask:
         terms_accepted_at = row.get("terms_accepted_at") or row.get("termsAcceptedAt")
         terms_version = row.get("terms_version") or row.get("termsVersion")
         legal_name = row.get("display_name")
+        bank_validated = str(verification.get("bank_validation_status") or "").lower() == "verified"
+        id_document_type = str(verification.get("id_document_type") or "").lower()
+        verification_asset_ready = False
+        if id_document_type == "bvn":
+            verification_asset_ready = bool(row.get("bvn_number")) and bank_validated
+        else:
+            verification_asset_ready = bool(verification["id_document_image_path"])
+        wallet_balance = float(row.get("walletBalance") or 100000.0)
+        cooldown_state = _deposit_cooldown_state(str(row.get("userId") or user_id))
+        cooling_balance = float(cooldown_state["cooling_balance"])
+        withdrawable_balance = round(max(0.0, wallet_balance - cooling_balance), 2)
         kyc_ready = bool(
             legal_name
+            and row.get("phone_number")
             and verification["verification_status"] == "approved"
             and verification["selfie_image_path"]
-            and (
-                verification["age_proof_image_path"]
-                if verification["id_document_type"] == "no_id"
-                else verification["id_document_image_path"]
-            )
+            and verification_asset_ready
         )
         return {
             "user_id": row.get("userId") or user_id,
@@ -158,6 +269,11 @@ def create_app() -> Flask:
             "handle": row.get("handle"),
             "bio": row.get("bio"),
             "avatar_url": row.get("avatar_url"),
+            "email": row.get("email"),
+            "first_name": row.get("first_name"),
+            "last_name": row.get("last_name"),
+            "phone_number": row.get("phone_number"),
+            "bvn_number": row.get("bvn_number"),
             "verified": verification["verification_status"] == "approved" or bool(row.get("verified")),
             "verification_status": verification["verification_status"],
             "verification_ready": kyc_ready,
@@ -167,10 +283,23 @@ def create_app() -> Flask:
             "age_proof_image_path": verification["age_proof_image_path"],
             "selfie_image_path": verification["selfie_image_path"],
             "birth_certificate_image_path": verification["age_proof_image_path"],
+            "bank_validation_status": verification["bank_validation_status"],
+            "bank_name": verification["bank_name"],
+            "bank_code": verification["bank_code"],
+            "bank_account_number": verification["bank_account_number"],
+            "bank_account_name": verification["bank_account_name"],
+            "bank_validation_checked_at": verification["bank_validation_checked_at"],
+            "verified_name": verification["verified_name"],
+            "verified_bank_account": verification["verified_bank_account"],
+            "verification_reference": verification["verification_reference"],
+            "paystack_customer_code": verification["paystack_customer_code"],
+            "withdrawal_cooldown_until": cooldown_state["withdrawal_cooldown_until"] or row.get("withdrawal_cooldown_until") or row.get("withdrawalCooldownUntil"),
+            "withdrawable_balance": withdrawable_balance,
+            "cooling_deposit_balance": cooling_balance,
             "terms_accepted": bool(terms_accepted_at),
             "terms_accepted_at": terms_accepted_at,
             "terms_version": terms_version,
-            "wallet_balance": float(row.get("walletBalance") or 100000.0),
+            "wallet_balance": wallet_balance,
             "currency": row.get("currency") or "NGN",
             "created_at": row.get("createdAt"),
             "updated_at": row.get("updatedAt"),
@@ -226,6 +355,488 @@ def create_app() -> Flask:
             return None
         return f"/api/admin/verification/uploads/{filename}"
 
+    def _paystack_secret_key() -> str | None:
+        for key_name in (
+            "PAYSTACK_TEST_SECRET_KEY",
+            "PAYSTACK_SECRET_KEY",
+            "PAYSTACK_LIVE_SECRET_KEY",
+        ):
+            value = os.getenv(key_name, "").strip()
+            if value:
+                return value
+        return None
+
+    def _paystack_public_key() -> str | None:
+        for key_name in (
+            "NEXT_PUBLIC_PAYSTACK_PUBLIC_KEY",
+            "PAYSTACK_PUBLIC_KEY",
+            "PAYSTACK_TEST_PUBLIC_KEY",
+        ):
+            value = os.getenv(key_name, "").strip()
+            if value:
+                return value
+        return None
+
+    def _paystack_bank_list() -> list[dict[str, Any]]:
+        def _fetch_all_live_banks() -> list[dict[str, Any]]:
+            collected: list[dict[str, Any]] = []
+            seen_cursors: set[str] = set()
+            cursor: str | None = None
+            for _ in range(50):
+                suffix = "/bank?country=nigeria&use_cursor=true&perPage=100"
+                if cursor:
+                    suffix += f"&next={quote(cursor)}"
+                response = _paystack_request(suffix)
+                rows = response.get("data") if isinstance(response, dict) else []
+                collected.extend([row for row in _as_list(rows) if isinstance(row, dict)])
+                meta = response.get("meta") if isinstance(response, dict) else {}
+                cursor = str((meta or {}).get("next") or "").strip()
+                if not cursor or cursor in seen_cursors:
+                    break
+                seen_cursors.add(cursor)
+            return _clean_bank_rows(collected)
+
+        with paystack_bank_cache_lock:
+            cached_rows, fetched_at = _read_cached_bank_list()
+            cache_age_ms = now_ms() - fetched_at if fetched_at else None
+            cache_fresh = bool(cached_rows) and cache_age_ms is not None and cache_age_ms < paystack_bank_cache_ttl_ms
+            if cache_fresh:
+                return cached_rows
+            try:
+                live_rows = _fetch_all_live_banks()
+                if live_rows:
+                    _write_cached_bank_list(live_rows)
+                    return live_rows
+            except Exception:
+                pass
+            if cached_rows:
+                return cached_rows
+        return [
+            {
+                "name": bank["name"],
+                "code": bank["code"],
+                "active": True,
+                "country": "Nigeria",
+                "currency": "NGN",
+                "type": "nuban",
+            }
+            for bank in PAYSTACK_NIGERIA_BANKS
+        ]
+
+    def _resolve_bank_code(bank_name: str) -> str | None:
+        name = bank_name.strip().lower()
+        if not name:
+            return None
+        for bank in _paystack_bank_list():
+            bank_name_value = str(bank.get("name") or bank.get("bank_name") or "").strip().lower()
+            if bank_name_value == name:
+                code = str(bank.get("code") or bank.get("bank_code") or "").strip()
+                if code:
+                    return code
+        return None
+
+    @app.get("/api/paystack/banks")
+    @require_auth
+    def paystack_banks():
+        banks = _paystack_bank_list()
+        banks.sort(key=lambda item: str(item.get("name") or "").lower())
+        return jsonify({"banks": banks})
+
+    def _paystack_resolve_account(bank_code: str, account_number: str) -> dict[str, Any]:
+        return _paystack_request(
+            f"/bank/resolve?account_number={quote(account_number)}&bank_code={quote(bank_code)}"
+        )
+
+    def _paystack_validate_customer(
+        *,
+        customer_code: str,
+        bank_code: str,
+        account_number: str,
+        bvn: str,
+        first_name: str,
+        last_name: str,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "country": "NG",
+            "type": "bank_account",
+            "account_number": account_number,
+            "bvn": bvn,
+            "bank_code": bank_code,
+            "first_name": first_name,
+            "last_name": last_name,
+        }
+        return _paystack_request(f"/customer/{quote(customer_code)}/identification", method="POST", payload=payload)
+
+    def _paystack_create_customer(*, email: str, first_name: str | None = None, last_name: str | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"email": email}
+        if first_name:
+            payload["first_name"] = first_name
+        if last_name:
+            payload["last_name"] = last_name
+        return _paystack_request("/customer", method="POST", payload=payload)
+
+    def _paystack_create_transfer_recipient(*, name: str, account_number: str, bank_code: str, currency: str = "NGN") -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "type": "nuban",
+            "name": name,
+            "account_number": account_number,
+            "bank_code": bank_code,
+            "currency": currency,
+        }
+        return _paystack_request("/transferrecipient", method="POST", payload=payload)
+
+    def _paystack_initiate_transfer(
+        *,
+        amount_kobo: int,
+        recipient_code: str,
+        reference: str,
+        reason: str,
+        source: str = "balance",
+        currency: str = "NGN",
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "source": source,
+            "amount": int(amount_kobo),
+            "recipient": recipient_code,
+            "reference": reference,
+            "reason": reason,
+            "currency": currency,
+        }
+        return _paystack_request("/transfer", method="POST", payload=payload)
+
+    def _paystack_fetch_transfer(transfer_id: str | None = None, reference: str | None = None) -> dict[str, Any] | None:
+        query: list[str] = []
+        if transfer_id:
+            query.append(f"transfer_code={quote(str(transfer_id))}")
+        if reference:
+            query.append(f"reference={quote(str(reference))}")
+        suffix = f"?{'&'.join(query)}" if query else ""
+        try:
+            return _paystack_request(f"/transfer{suffix}")
+        except Exception:
+            return None
+
+    def _normalize_account_name(name: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", name.strip().lower()).strip()
+
+    def _request_context() -> dict[str, Any]:
+        forwarded_for = str(request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+        ip = forwarded_for or str(request.headers.get("X-Real-IP") or request.remote_addr or "")
+        return {
+            "ipAddress": ip or None,
+            "userAgent": str(request.headers.get("User-Agent") or "")[:500] or None,
+            "deviceId": str(request.headers.get("X-Device-Id") or request.headers.get("X-Client-Device-Id") or "")[:120] or None,
+        }
+
+    def _day_window(ts: datetime | None = None) -> tuple[int, int]:
+        current = ts or now_utc()
+        start = datetime(current.year, current.month, current.day, tzinfo=timezone.utc)
+        end = start + timedelta(days=1)
+        return int(start.timestamp() * 1000), int(end.timestamp() * 1000)
+
+    def _entries_for_day(rows: list[dict[str, Any]], *, field: str = "createdAt") -> list[dict[str, Any]]:
+        start_ms, end_ms = _day_window()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            ts = _parse_float(row.get(field))
+            if start_ms <= ts < end_ms:
+                out.append(row)
+        return out
+
+    def _ensure_paystack_customer(profile: dict[str, Any]) -> str | None:
+        customer_code = str(profile.get("paystack_customer_code") or profile.get("paystackCustomerCode") or "").strip()
+        if customer_code:
+            return customer_code
+        email = str(profile.get("email") or "").strip()
+        if not email:
+            return None
+        try:
+            resp = _paystack_create_customer(
+                email=email,
+                first_name=str(profile.get("first_name") or "").strip() or None,
+                last_name=str(profile.get("last_name") or "").strip() or None,
+            )
+            data = resp.get("data") if isinstance(resp, dict) else {}
+            customer_code = str((data or {}).get("customer_code") or "").strip()
+            if customer_code:
+                profile_id = str(profile.get("id") or uuid.uuid4())
+                updated = dict(profile)
+                updated["paystack_customer_code"] = customer_code
+                updated["updatedAt"] = now_ms()
+                admin_transact([["update", "profiles", profile_id, updated]])
+                return customer_code
+        except Exception:
+            return None
+        return None
+
+    def _risk_review_level(amount: float) -> str:
+        if amount < 100000:
+            return "automatic"
+        if amount <= 500000:
+            return "enhanced"
+        return "manual"
+
+    def _risk_score_for_withdrawal(
+        *,
+        profile: dict[str, Any],
+        amount: float,
+        bank_name: str,
+        account_name: str,
+        account_number: str,
+        daily_deposit_count: int,
+        daily_deposit_volume: float,
+        daily_withdrawal_count: int,
+        daily_withdrawal_volume: float,
+        cooldown_until: int | None,
+    ) -> tuple[int, list[str]]:
+        flags: list[str] = []
+        score = 0
+        if amount >= 500000:
+            score += 30
+            flags.append("large_transaction")
+        elif amount >= 100000:
+            score += 10
+            flags.append("medium_transaction")
+        if daily_withdrawal_count >= 3 or daily_withdrawal_volume >= 500000:
+            score += 10
+            flags.append("high_withdrawal_velocity")
+        if daily_deposit_count >= 3 or daily_deposit_volume >= 500000:
+            score += 10
+            flags.append("high_deposit_velocity")
+        if cooldown_until and now_ms() < cooldown_until:
+            score += 25
+            flags.append("cooling_off_active")
+        verified_bank_name = str(profile.get("bank_name") or profile.get("bankName") or "").strip()
+        verified_bank_number = str(profile.get("bank_account_number") or profile.get("bankAccountNumber") or "").strip()
+        verified_bank_holder = str(profile.get("bank_account_name") or profile.get("bankAccountName") or "").strip()
+        if verified_bank_name and bank_name and _normalize_account_name(verified_bank_name) != _normalize_account_name(bank_name):
+            score += 15
+            flags.append("bank_name_mismatch")
+        if verified_bank_number and account_number and verified_bank_number != account_number.strip():
+            score += 25
+            flags.append("bank_account_number_mismatch")
+        if verified_bank_holder and account_name and _name_match_count(verified_bank_holder, account_name) < 2:
+            score += 35
+            flags.append("bank_account_name_mismatch")
+        if not profile.get("phone_number") and not profile.get("phoneNumber"):
+            score += 10
+            flags.append("missing_phone_number")
+        if not str(profile.get("paystack_customer_code") or profile.get("paystackCustomerCode") or "").strip():
+            score += 10
+            flags.append("missing_paystack_customer")
+        return score, flags
+
+    def _paystack_request(path: str, *, method: str = "GET", payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        secret = _paystack_secret_key()
+        if not secret:
+            raise ValueError("missing_paystack_secret_key")
+        url = f"{PAYSTACK_API_BASE}{path}"
+        data = None
+        headers = {
+            "Authorization": f"Bearer {secret}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if payload is not None:
+            data = jsonlib.dumps(payload).encode("utf-8")
+        req = urlrequest.Request(url, data=data, headers=headers, method=method.upper())
+        try:
+            with urlrequest.urlopen(req, timeout=20) as resp:
+                raw = resp.read().decode("utf-8")
+        except urlerror.HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            try:
+                body = jsonlib.loads(raw) if raw else {}
+            except Exception:
+                body = {"error": raw}
+            message = body.get("message") or body.get("error") or raw or "paystack_http_error"
+            raise ValueError(f"paystack_http_{exc.code}: {message}")
+        except urlerror.URLError as exc:
+            raise ValueError(f"paystack_request_failed:{exc.reason}") from exc
+        try:
+            parsed = jsonlib.loads(raw) if raw else {}
+        except Exception as exc:
+            raise ValueError("paystack_invalid_json") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("paystack_invalid_response")
+        return parsed
+
+    def _paystack_reference() -> str:
+        return f"sheybi_dep_{uuid.uuid4().hex[:24]}"
+
+    def _deposit_request_row(reference: str) -> dict[str, Any] | None:
+        data = admin_query({"deposit_requests": {"$": {"where": {"reference": reference}}}})
+        rows = _as_list(data.get("deposit_requests"))
+        return rows[0] if rows else None
+
+    def _deposit_requests_for_user(user_id: str) -> list[dict[str, Any]]:
+        data = admin_query({"deposit_requests": {"$": {"where": {"userId": user_id}}}})
+        rows = _as_list(data.get("deposit_requests"))
+        rows.sort(key=lambda item: item.get("createdAt", 0), reverse=True)
+        return rows
+
+    def _deposit_cooldown_state(user_id: str) -> dict[str, Any]:
+        cooldown_hours = int(os.getenv("WITHDRAWAL_COOLDOWN_HOURS", "24"))
+        cooldown_ms = cooldown_hours * 60 * 60 * 1000
+        now_value = now_ms()
+        cooling_balance = 0.0
+        latest_unlock = 0
+        for row in _deposit_requests_for_user(user_id):
+            status = str(row.get("status") or "").lower()
+            if status not in {"paid", "completed", "credited"}:
+                continue
+            amount = round(_parse_float(row.get("amount")), 2)
+            if amount <= 0:
+                continue
+            paid_at_ms = _to_ms(
+                row.get("paidAt")
+                or row.get("paid_at")
+                or row.get("verifiedAt")
+                or row.get("verified_at")
+                or row.get("createdAt")
+            )
+            if paid_at_ms <= 0:
+                continue
+            unlock_at = paid_at_ms + cooldown_ms
+            if now_value < unlock_at:
+                cooling_balance += amount
+                latest_unlock = max(latest_unlock, unlock_at)
+        return {
+            "cooling_balance": round(cooling_balance, 2),
+            "withdrawable_balance": None,  # filled by caller
+            "withdrawal_cooldown_until": latest_unlock or None,
+        }
+
+    def _withdrawal_requests_for_user(user_id: str) -> list[dict[str, Any]]:
+        data = admin_query({"withdrawal_requests": {"$": {"where": {"userId": user_id}}}})
+        rows = _as_list(data.get("withdrawal_requests"))
+        rows.sort(key=lambda item: item.get("createdAt", 0), reverse=True)
+        return rows
+
+    def _serialize_deposit_request(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": row.get("id"),
+            "reference": row.get("reference"),
+            "user_id": row.get("userId"),
+            "amount": round(_parse_float(row.get("amount")), 2),
+            "amount_kobo": int(round(_parse_float(row.get("amountKobo")) or (_parse_float(row.get("amount")) * 100))),
+            "status": row.get("status"),
+            "channel": row.get("channel"),
+            "paystack_status": row.get("paystackStatus"),
+            "gateway_response": row.get("gatewayResponse"),
+            "transaction_id": row.get("transactionId"),
+            "authorization_url": row.get("authorizationUrl"),
+            "access_code": row.get("accessCode"),
+            "callback_url": row.get("callbackUrl"),
+            "metadata": row.get("metadata"),
+            "paid_at": row.get("paidAt"),
+            "verified_at": row.get("verifiedAt"),
+            "created_at": row.get("createdAt"),
+            "updated_at": row.get("updatedAt"),
+        }
+
+    def _finalize_deposit_request(reference: str, transaction: dict[str, Any]) -> dict[str, Any]:
+        with trade_lock:
+            row = _deposit_request_row(reference)
+            if not row:
+                raise ValueError("deposit_not_found")
+            if str(row.get("status") or "").lower() in {"paid", "completed", "credited"}:
+                return _serialize_deposit_request(row)
+
+            user_id = str(row.get("userId") or "")
+            if not user_id:
+                raise ValueError("deposit_missing_user")
+
+            tx_amount_kobo = int(round(_parse_float(transaction.get("amount"))))
+            expected_kobo = int(
+                round(_parse_float(row.get("amountKobo")) or (_parse_float(row.get("amount")) * 100))
+            )
+            if tx_amount_kobo != expected_kobo:
+                raise ValueError("deposit_amount_mismatch")
+
+            tx_currency = str(transaction.get("currency") or row.get("currency") or "NGN").upper()
+            if tx_currency != "NGN":
+                raise ValueError("unsupported_currency")
+
+            tx_status = str(transaction.get("status") or "").lower()
+            if tx_status not in {"success", "successful"}:
+                raise ValueError("deposit_not_successful")
+
+            profile = _query_profile(user_id) or {"userId": user_id, "walletBalance": 100000.0, "currency": "NGN"}
+            wallet_before = _parse_float(profile.get("walletBalance")) or 100000.0
+            amount_ngn = round(expected_kobo / 100.0, 2)
+            next_wallet_balance = round(wallet_before + amount_ngn, 2)
+            profile_id = str(profile.get("id") or uuid.uuid4())
+            now_created = now_ms()
+            existing_cooldown = int(_parse_float(profile.get("withdrawal_cooldown_until") or profile.get("withdrawalCooldownUntil")))
+            cooldown_hours = int(os.getenv("WITHDRAWAL_COOLDOWN_HOURS", "24"))
+            next_cooldown = max(existing_cooldown, now_ms() + (cooldown_hours * 60 * 60 * 1000))
+            updated_profile = {
+                "userId": user_id,
+                "display_name": profile.get("display_name"),
+                "handle": profile.get("handle"),
+                "bio": profile.get("bio"),
+                "avatar_url": profile.get("avatar_url"),
+                "email": profile.get("email"),
+                "first_name": profile.get("first_name"),
+                "last_name": profile.get("last_name"),
+                "phone_number": profile.get("phone_number") or profile.get("phoneNumber"),
+                **_verification_fields(profile),
+                "walletBalance": next_wallet_balance,
+                "currency": profile.get("currency") or "NGN",
+                "withdrawal_cooldown_until": next_cooldown,
+                "createdAt": profile.get("createdAt") or now_created,
+                "updatedAt": now_created,
+            }
+            updated_row = dict(row)
+            updated_row.update(
+                {
+                    "status": "paid",
+                    "paystackStatus": tx_status,
+                    "gatewayResponse": transaction.get("gateway_response"),
+                    "transactionId": transaction.get("id"),
+                    "paidAt": transaction.get("paid_at") or transaction.get("paidAt") or now_utc().isoformat(),
+                    "verifiedAt": now_created,
+                    "updatedAt": now_created,
+                }
+            )
+            platform_state = _platform_state()
+            reserve_before = _parse_float(platform_state.get("reserveBalance"))
+            fee_balance_before = _parse_float(platform_state.get("feeBalance"))
+            updated_platform_state = {
+                "id": platform_state_id,
+                "reserveBalance": round(reserve_before + amount_ngn, 2),
+                "feeBalance": round(fee_balance_before, 2),
+                "createdAt": platform_state.get("createdAt") or now_created,
+                "updatedAt": now_created,
+            }
+            admin_transact(
+                [
+                    ["update", "profiles", profile_id, updated_profile],
+                    ["update", "platform_state", platform_state_id, updated_platform_state],
+                    [
+                        "update",
+                        "platform_ledger",
+                        str(uuid.uuid4()),
+                        {
+                            "kind": "deposit",
+                            "reference": reference,
+                            "deltaReserve": amount_ngn,
+                            "deltaFee": 0.0,
+                            "reserveBalance": round(reserve_before + amount_ngn, 2),
+                            "feeBalance": round(fee_balance_before, 2),
+                            "createdAt": now_created,
+                            "updatedAt": now_created,
+                        },
+                    ],
+                    ["update", "deposit_requests", str(row.get("id") or reference), updated_row],
+                ]
+            )
+            stored = _deposit_request_row(reference)
+            if not stored:
+                raise RuntimeError("deposit_finalize_failed")
+            return _serialize_deposit_request(stored)
+
     def _verification_fields(profile: dict[str, Any] | None) -> dict[str, Any]:
         row = profile or {}
         verification_status = str(
@@ -246,6 +857,18 @@ def create_app() -> Flask:
             "age_proof_image_path": row.get("age_proof_image_path") or row.get("ageProofImagePath") or row.get("birth_certificate_image_path") or row.get("birthCertificateImagePath"),
             "birth_certificate_image_path": row.get("birth_certificate_image_path") or row.get("birthCertificateImagePath") or row.get("age_proof_image_path") or row.get("ageProofImagePath"),
             "selfie_image_path": row.get("selfie_image_path") or row.get("selfieImagePath"),
+            "bank_validation_status": row.get("bank_validation_status") or row.get("bankValidationStatus"),
+            "bank_name": row.get("bank_name") or row.get("bankName"),
+            "bank_code": row.get("bank_code") or row.get("bankCode"),
+            "bank_account_number": row.get("bank_account_number") or row.get("bankAccountNumber"),
+            "bank_account_name": row.get("bank_account_name") or row.get("bankAccountName"),
+            "bank_validation_checked_at": row.get("bank_validation_checked_at") or row.get("bankValidationCheckedAt"),
+            "paystack_customer_code": row.get("paystack_customer_code") or row.get("paystackCustomerCode"),
+            "verified_name": row.get("verified_name") or row.get("verifiedName") or row.get("display_name"),
+            "verified_bank_account": row.get("verified_bank_account") or row.get("verifiedBankAccount"),
+            "verification_reference": row.get("verification_reference") or row.get("verificationReference"),
+            "phone_number": row.get("phone_number") or row.get("phoneNumber"),
+            "bvn_number": row.get("bvn_number") or row.get("bvnNumber"),
             "verification_submitted_at": row.get("verification_submitted_at") or row.get("verificationSubmittedAt"),
             "verification_reviewed_at": row.get("verification_reviewed_at") or row.get("verificationReviewedAt"),
         }
@@ -1037,6 +1660,11 @@ def create_app() -> Flask:
         handle: str | None = None,
         bio: str | None = None,
         avatar_url: str | None = None,
+        email: str | None = None,
+        first_name: str | None = None,
+        last_name: str | None = None,
+        phone_number: str | None = None,
+        paystack_customer_code: str | None = None,
         terms_accepted: bool | None = None,
     ) -> dict[str, Any]:
         def clean(value: str | None, max_len: int) -> str | None:
@@ -1055,13 +1683,34 @@ def create_app() -> Flask:
             "handle": clean(handle, 50) if handle is not None else existing.get("handle"),
             "bio": clean(bio, 2000) if bio is not None else existing.get("bio"),
             "avatar_url": clean(avatar_url, 500) if avatar_url is not None else existing.get("avatar_url"),
+            "email": clean(email, 255) if email is not None else existing.get("email"),
+            "first_name": clean(first_name, 120) if first_name is not None else existing.get("first_name"),
+            "last_name": clean(last_name, 120) if last_name is not None else existing.get("last_name"),
+            "phone_number": clean(phone_number, 30) if phone_number is not None else existing.get("phone_number") or existing.get("phoneNumber"),
             **_verification_fields(existing),
             "terms_accepted_at": existing.get("terms_accepted_at") or existing.get("termsAcceptedAt"),
             "terms_version": existing.get("terms_version") or existing.get("termsVersion"),
+            "paystack_customer_code": clean(paystack_customer_code, 120) if paystack_customer_code is not None else existing.get("paystack_customer_code") or existing.get("paystackCustomerCode"),
             "walletBalance": float(existing.get("walletBalance") or 100000.0) if existing else 100000.0,
             "currency": existing.get("currency") if existing and existing.get("currency") else "NGN",
             "updatedAt": now_ms(),
         }
+        if not profile.get("paystack_customer_code"):
+            customer_email = profile.get("email")
+            if customer_email:
+                try:
+                    customer_resp = _paystack_create_customer(
+                        email=str(customer_email),
+                        first_name=profile.get("first_name"),
+                        last_name=profile.get("last_name"),
+                    )
+                    customer_data = customer_resp.get("data") if isinstance(customer_resp, dict) else {}
+                    customer_code = str((customer_data or {}).get("customer_code") or "").strip()
+                    if customer_code:
+                        profile["paystack_customer_code"] = customer_code
+                except Exception:
+                    # Keep onboarding/profile save working even if Paystack is temporarily unavailable.
+                    pass
         if terms_accepted:
             profile["terms_accepted_at"] = existing.get("terms_accepted_at") or existing.get("termsAcceptedAt") or now_ms()
             profile["terms_version"] = TERMS_VERSION
@@ -1278,6 +1927,11 @@ def create_app() -> Flask:
                 handle=data.get("handle"),
                 bio=data.get("bio"),
                 avatar_url=data.get("avatar_url"),
+                email=data.get("email"),
+                first_name=data.get("first_name"),
+                last_name=data.get("last_name"),
+                phone_number=data.get("phone_number") or data.get("phoneNumber"),
+                paystack_customer_code=data.get("paystack_customer_code") or data.get("paystackCustomerCode"),
                 terms_accepted=bool(data.get("terms_accepted") or data.get("termsAccepted")),
             )
         except Exception as exc:
@@ -1316,44 +1970,111 @@ def create_app() -> Flask:
 
             form = request.form or {}
             doc_type = str(form.get("document_type") or form.get("documentType") or "").strip().lower()
-            if doc_type not in {"nin_slip", "voters_card", "passport", "no_id"}:
+            if doc_type not in {"bvn", "nin_slip", "voters_card", "passport"}:
                 return jsonify({"error": "invalid_document_type"}), 400
 
-            id_file = request.files.get("document_image") or request.files.get("id_image")
-            age_proof_type = str(form.get("age_proof_type") or form.get("ageProofType") or "").strip().lower()
-            age_proof_file = request.files.get("age_proof_image") or request.files.get("ageProofImage")
             selfie_file = request.files.get("selfie_image")
+            phone_number = _clean_text(str(form.get("phone_number") or form.get("phoneNumber") or ""), 30)
+            bvn = _clean_text(str(form.get("bvn") or form.get("bvnNumber") or form.get("bvn_number") or ""), 20)
+            bank_name = _clean_text(str(form.get("bank_name") or form.get("bankName") or ""), 120)
+            bank_code = _clean_text(str(form.get("bank_code") or form.get("bankCode") or ""), 20)
+            bank_account_number = _clean_text(str(form.get("bank_account_number") or form.get("bankAccountNumber") or ""), 20)
+            bank_account_name = _clean_text(str(form.get("bank_account_name") or form.get("bankAccountName") or ""), 120)
+            id_file = None
+            bank_validation_status = None
+            bank_validation_checked_at = None
+            bank_auto_approved = False
+            verified_bank_account = None
             if not selfie_file:
                 return jsonify({"error": "missing_files", "required": ["selfie_image"]}), 400
-            if doc_type == "no_id":
-                if age_proof_type not in {"work_id", "student_card", "university_id", "birth_certificate"}:
-                    return jsonify({"error": "invalid_age_proof_type"}), 400
-                if not age_proof_file:
-                    return jsonify({"error": "missing_files", "required": ["age_proof_image"]}), 400
-            elif not id_file:
-                return jsonify({"error": "missing_files", "required": ["document_image"]}), 400
+            if not phone_number:
+                return jsonify({"error": "missing_fields", "required": ["phone_number"]}), 400
+            if doc_type == "bvn":
+                if not bvn or not re.fullmatch(r"\d{11}", bvn):
+                    return jsonify({"error": "invalid_bvn"}), 400
+                if not bank_name or not bank_account_number or not bank_account_name:
+                    return jsonify(
+                        {
+                            "error": "missing_fields",
+                            "required": ["bank_name", "bank_account_number", "bank_account_name"],
+                        }
+                    ), 400
+                resolved_bank_code = bank_code or _resolve_bank_code(bank_name)
+                if not resolved_bank_code:
+                    return jsonify({"error": "bank_not_supported", "detail": bank_name}), 400
+                verified_bank_account = f"{bank_name} / {bank_account_name} / {bank_account_number}"
+                customer_code = _ensure_paystack_customer(profile)
+                if not customer_code:
+                    return jsonify({"error": "missing_paystack_customer"}), 400
+                try:
+                    validation_resp = _paystack_validate_customer(
+                        customer_code=customer_code,
+                        bank_code=resolved_bank_code,
+                        account_number=bank_account_number,
+                        bvn=bvn,
+                        first_name=str(profile.get("first_name") or "").strip() or (display_name.split(" ")[0] if display_name else ""),
+                        last_name=str(profile.get("last_name") or "").strip() or " ".join(display_name.split(" ")[1:]),
+                    )
+                    data_node = validation_resp.get("data") if isinstance(validation_resp, dict) else {}
+                    validation_status = str(
+                        (data_node or {}).get("status")
+                        or validation_resp.get("status")
+                        or validation_resp.get("message")
+                        or ""
+                    ).lower()
+                    if validation_status in {"true", "success", "successful", "approved"}:
+                        bank_validation_status = "verified"
+                        bank_validation_checked_at = now_ms()
+                        verified_bank_account = f"{bank_name} / {bank_account_name} / {bank_account_number}"
+                        bank_auto_approved = True
+                    else:
+                        bank_validation_status = "pending_review"
+                except Exception:
+                    bank_validation_status = "pending_review"
+            elif doc_type in {"nin_slip", "voters_card", "passport"}:
+                id_file = request.files.get("document_image") or request.files.get("id_image")
+                if not id_file:
+                    return jsonify({"error": "missing_files", "required": ["document_image"]}), 400
+            else:
+                return jsonify({"error": "invalid_document_type"}), 400
 
             stored_doc = _save_verification_file(user_id, "id", id_file) if id_file else None
-            stored_age_proof = _save_verification_file(user_id, "age_proof", age_proof_file) if age_proof_file else None
             stored_selfie = _save_verification_file(user_id, "selfie", selfie_file)
             now_created = now_ms()
+            request_ctx = _request_context()
+            approved = bank_auto_approved and doc_type == "bvn"
             payload = {
                 "userId": user_id,
                 "display_name": profile.get("display_name"),
                 "handle": profile.get("handle"),
                 "bio": profile.get("bio"),
                 "avatar_url": profile.get("avatar_url"),
-                "verified": False,
-                "verification_status": "pending_review",
+                "email": profile.get("email"),
+                "first_name": profile.get("first_name"),
+                "last_name": profile.get("last_name"),
+                "phone_number": phone_number,
+                "bvn_number": bvn if doc_type == "bvn" else profile.get("bvn_number") or profile.get("bvnNumber"),
+                **request_ctx,
+                "verified": approved,
+                "verification_status": "approved" if approved else "pending_review",
                 "verification_notes": None,
                 "id_document_type": doc_type,
                 "id_document_image_path": stored_doc,
-                "age_proof_type": age_proof_type or None,
-                "age_proof_image_path": stored_age_proof,
+                "age_proof_type": None,
+                "age_proof_image_path": None,
                 "selfie_image_path": stored_selfie,
-                "birth_certificate_image_path": stored_age_proof,
+                "bank_validation_status": bank_validation_status if doc_type == "bvn" else None,
+                "bank_name": bank_name if doc_type == "bvn" else None,
+                "bank_code": (bank_code or _resolve_bank_code(bank_name)) if doc_type == "bvn" else None,
+                "bank_account_number": bank_account_number if doc_type == "bvn" else None,
+                "bank_account_name": bank_account_name if doc_type == "bvn" else None,
+                "bank_validation_checked_at": bank_validation_checked_at if doc_type == "bvn" else None,
+                "verification_reference": f"kyc_{uuid.uuid4().hex[:16]}",
+                "verified_name": profile.get("display_name"),
+                "verified_bank_account": verified_bank_account if doc_type == "bvn" else None,
+                "birth_certificate_image_path": None,
                 "verification_submitted_at": now_created,
-                "verification_reviewed_at": None,
+                "verification_reviewed_at": now_created if approved else None,
                 "walletBalance": float(profile.get("walletBalance") or 100000.0),
                 "currency": profile.get("currency") or "NGN",
                 "createdAt": profile.get("createdAt") or now_created,
@@ -1385,9 +2106,31 @@ def create_app() -> Flask:
                         "id": row.get("id"),
                         "amount": _parse_float(row.get("amount")),
                         "status": row.get("status"),
+                        "review_level": row.get("reviewLevel") or row.get("review_level"),
+                        "risk_score": row.get("riskScore") or row.get("risk_score"),
+                        "risk_flags": row.get("riskFlags") or row.get("risk_flags"),
                         "bank_name": row.get("bankName"),
+                        "bank_code": row.get("bankCode"),
                         "account_name": row.get("accountName"),
                         "account_number": row.get("accountNumber"),
+                        "verified_name": row.get("verifiedName") or row.get("verified_name"),
+                        "verified_bank_account": row.get("verifiedBankAccount") or row.get("verified_bank_account"),
+                        "bank_validation_status": row.get("bankValidationStatus") or row.get("bank_validation_status"),
+                        "verification_reference": row.get("verificationReference") or row.get("verification_reference"),
+                        "paystack_customer_code": row.get("paystackCustomerCode") or row.get("paystack_customer_code"),
+                        "daily_deposit_count": row.get("dailyDepositCount") or row.get("daily_deposit_count"),
+                        "daily_deposit_volume": row.get("dailyDepositVolume") or row.get("daily_deposit_volume"),
+                        "daily_withdrawal_count": row.get("dailyWithdrawalCount") or row.get("daily_withdrawal_count"),
+                        "daily_withdrawal_volume": row.get("dailyWithdrawalVolume") or row.get("daily_withdrawal_volume"),
+                        "cooldown_until": row.get("cooldownUntil") or row.get("cooldown_until"),
+                        "ip_address": row.get("ipAddress") or row.get("ip_address"),
+                        "user_agent": row.get("userAgent") or row.get("user_agent"),
+                        "recipient_code": row.get("recipientCode") or row.get("recipient_code"),
+                        "transfer_reference": row.get("transferReference") or row.get("transfer_reference"),
+                        "transfer_status": row.get("transferStatus") or row.get("transfer_status"),
+                        "transfer_response": row.get("transferResponse") or row.get("transfer_response"),
+                        "approved_at": row.get("approvedAt") or row.get("approved_at"),
+                        "processed_at": row.get("processedAt") or row.get("processed_at"),
                         "note": row.get("note"),
                         "created_at": row.get("createdAt"),
                         "updated_at": row.get("updatedAt"),
@@ -1397,6 +2140,169 @@ def create_app() -> Flask:
             }
         )
 
+    @app.get("/api/me/deposits")
+    @require_auth
+    def me_deposits():
+        user_id = g.clerk_user_id
+        try:
+            rows = _deposit_requests_for_user(user_id)
+        except Exception as exc:
+            return jsonify({"error": "deposits_load_failed", "detail": str(exc)}), 500
+        return jsonify({"deposits": [_serialize_deposit_request(row) for row in rows]})
+
+    @app.post("/api/paystack/deposits/initialize")
+    @require_auth
+    def paystack_deposits_initialize():
+        user_id = g.clerk_user_id
+        data = request.get_json(silent=True) or {}
+        try:
+            amount = _parse_float(data.get("amount"))
+            if amount <= 0:
+                return jsonify({"error": "amount_must_be_positive"}), 400
+            if amount < 100:
+                return jsonify({"error": "minimum_deposit", "minimum": 100}), 400
+            email = _clean_text(str(data.get("email") or data.get("customer_email") or ""), 255)
+            if not email:
+                return jsonify({"error": "missing_fields", "required": ["email"]}), 400
+            callback_url = _clean_text(str(data.get("callback_url") or data.get("callbackUrl") or ""), 500)
+            if not callback_url:
+                return jsonify({"error": "missing_fields", "required": ["callback_url"]}), 400
+            reference = _paystack_reference()
+            amount_kobo = int(round(amount * 100))
+            metadata = {
+                "user_id": user_id,
+                "reference": reference,
+                "deposit_amount": amount,
+            }
+            request_ctx = _request_context()
+            request_id = str(uuid.uuid4())
+            now_created = now_ms()
+            request_payload = {
+                "id": request_id,
+                "userId": user_id,
+                "reference": reference,
+                "amount": round(amount, 2),
+                "amountKobo": amount_kobo,
+                "currency": "NGN",
+                "status": "pending",
+                "paystackStatus": "pending",
+                "authorizationUrl": None,
+                "accessCode": None,
+                "callbackUrl": callback_url,
+                "metadata": metadata,
+                "gatewayResponse": "pending",
+                "transactionId": None,
+                "email": email,
+                **request_ctx,
+                "createdAt": now_created,
+                "updatedAt": now_created,
+            }
+            admin_transact([["update", "deposit_requests", request_id, request_payload]])
+            return jsonify(
+                {
+                    "deposit": _serialize_deposit_request(_deposit_request_row(reference) or request_payload),
+                    "reference": reference,
+                    "public_key": _paystack_public_key(),
+                    "amount_kobo": amount_kobo,
+                    "callback_url": callback_url,
+                }
+            )
+        except Exception as exc:
+            return jsonify({"error": "deposit_initialize_failed", "detail": str(exc)}), 500
+
+    @app.get("/api/paystack/deposits/verify/<reference>")
+    @require_auth
+    def paystack_deposits_verify(reference: str):
+        user_id = g.clerk_user_id
+        try:
+            row = _deposit_request_row(reference)
+            if not row:
+                return jsonify({"error": "deposit_not_found"}), 404
+            if str(row.get("userId") or "") != user_id and not is_admin_user(user_id):
+                return jsonify({"error": "forbidden"}), 403
+            return jsonify({"ok": True, "deposit": _serialize_deposit_request(row)})
+        except Exception as exc:
+            return jsonify({"error": "deposit_verify_failed", "detail": str(exc)}), 500
+
+    @app.post("/api/paystack/deposits/confirm")
+    @require_auth
+    def paystack_deposits_confirm():
+        user_id = g.clerk_user_id
+        data = request.get_json(silent=True) or {}
+        reference = _clean_text(str(data.get("reference") or data.get("ref") or data.get("trxref") or ""), 128)
+        if not reference:
+            return jsonify({"error": "missing_fields", "required": ["reference"]}), 400
+        try:
+            row = _deposit_request_row(reference)
+            if not row:
+                return jsonify({"error": "deposit_not_found"}), 404
+            if str(row.get("userId") or "") != user_id and not is_admin_user(user_id):
+                return jsonify({"error": "forbidden"}), 403
+            amount_kobo = int(round(_parse_float(row.get("amountKobo")) or (_parse_float(row.get("amount")) * 100)))
+            transaction = {
+                "id": data.get("transaction_id") or data.get("transactionId") or reference,
+                "reference": reference,
+                "amount": amount_kobo,
+                "currency": "NGN",
+                "status": "success",
+                "gateway_response": data.get("gateway_response") or data.get("gatewayResponse") or "browser_callback_confirmed",
+                "paid_at": data.get("paid_at") or data.get("paidAt") or now_utc().isoformat(),
+            }
+            finalized = _finalize_deposit_request(reference, transaction)
+            return jsonify({"ok": True, "deposit": finalized})
+        except Exception as exc:
+            return jsonify({"error": "deposit_confirm_failed", "detail": str(exc)}), 500
+
+    @app.post("/api/paystack/webhook")
+    def paystack_webhook():
+        secret = _paystack_secret_key()
+        if not secret:
+            return jsonify({"error": "missing_paystack_secret_key"}), 500
+        signature = request.headers.get("x-paystack-signature", "")
+        payload_bytes = request.get_data(cache=False, as_text=False) or b""
+        computed = hmac.new(secret.encode("utf-8"), payload_bytes, hashlib.sha512).hexdigest()
+        if not signature or not hmac.compare_digest(computed, signature):
+            return jsonify({"error": "invalid_signature"}), 401
+        try:
+            body = jsonlib.loads(payload_bytes.decode("utf-8") or "{}")
+            if not isinstance(body, dict):
+                body = {}
+            event = str(body.get("event") or "").lower()
+            data_node = body.get("data") or {}
+            reference = str(data_node.get("reference") or "").strip()
+            if event == "charge.success" and reference:
+                _finalize_deposit_request(reference, data_node)
+            elif event in {"customeridentification.success", "customeridentification.failed"}:
+                customer_code = str(data_node.get("customer_code") or "").strip()
+                if customer_code:
+                    profiles = _as_list(admin_query({"profiles": {"$": {"where": {"paystack_customer_code": customer_code}}}}))
+                    profile = profiles[0] if profiles else None
+                    if profile:
+                        profile_id = str(profile.get("id") or uuid.uuid4())
+                        now_created = now_ms()
+                        approved = event == "customeridentification.success"
+                        payload = {
+                            "userId": profile.get("userId"),
+                            "display_name": profile.get("display_name"),
+                            "handle": profile.get("handle"),
+                            "bio": profile.get("bio"),
+                            "avatar_url": profile.get("avatar_url"),
+                            "email": profile.get("email"),
+                            "first_name": profile.get("first_name"),
+                            "last_name": profile.get("last_name"),
+                            "phone_number": profile.get("phone_number") or profile.get("phoneNumber"),
+                            **_verification_fields(profile),
+                            "verified": approved,
+                            "verification_status": "approved" if approved else "rejected",
+                            "verification_notes": None if approved else str((data_node or {}).get("reason") or "customer_identification_failed"),
+                            "verification_reviewed_at": now_created,
+                            "updatedAt": now_created,
+                        }
+                        admin_transact([["update", "profiles", profile_id, payload]])
+            return jsonify({"ok": True})
+        except Exception as exc:
+            return jsonify({"error": "webhook_failed", "detail": str(exc)}), 400
+
     @app.post("/api/me/withdrawals")
     @require_auth
     def request_withdrawal():
@@ -1405,8 +2311,10 @@ def create_app() -> Flask:
         try:
             amount = _parse_float(data.get("amount"))
             bank_name = _clean_text(str(data.get("bank_name") or data.get("bankName") or ""), 120)
+            bank_code = _clean_text(str(data.get("bank_code") or data.get("bankCode") or ""), 20)
             account_name = _clean_text(str(data.get("account_name") or data.get("accountName") or ""), 200)
             account_number = _clean_text(str(data.get("account_number") or data.get("accountNumber") or ""), 20)
+            request_phone_number = _clean_text(str(data.get("phone_number") or data.get("phoneNumber") or ""), 30)
             if amount <= 0:
                 return jsonify({"error": "amount_must_be_positive"}), 400
             if not bank_name or not account_name or not account_number:
@@ -1416,6 +2324,7 @@ def create_app() -> Flask:
                 profile = _query_profile(user_id)
                 if not profile:
                     return jsonify({"error": "profile_not_found"}), 404
+                _ensure_paystack_customer(profile)
                 verification_status = str(
                     profile.get("verification_status")
                     or profile.get("verificationStatus")
@@ -1423,14 +2332,65 @@ def create_app() -> Flask:
                 ).lower()
                 if verification_status != "approved" or not profile.get("verified"):
                     return jsonify({"error": "verification_required"}), 400
+                profile_phone_number = str(profile.get("phone_number") or profile.get("phoneNumber") or "").strip()
+                effective_phone_number = profile_phone_number or request_phone_number
+                if not effective_phone_number:
+                    return jsonify({"error": "phone_number_required"}), 400
                 display_name = str(profile.get("display_name") or "").strip()
                 if _name_match_count(display_name, account_name) < 2:
                     return jsonify({"error": "account_name_mismatch"}), 400
+                verified_bank_name = str(profile.get("bank_name") or profile.get("bankName") or "").strip()
+                verified_bank_number = str(profile.get("bank_account_number") or profile.get("bankAccountNumber") or "").strip()
+                verified_bank_holder = str(profile.get("bank_account_name") or profile.get("bankAccountName") or "").strip()
+                if verified_bank_name and _normalize_account_name(verified_bank_name) != _normalize_account_name(bank_name):
+                    return jsonify({"error": "verified_bank_required"}), 400
+                if verified_bank_number and verified_bank_number != account_number.strip():
+                    return jsonify({"error": "verified_bank_required"}), 400
+                if verified_bank_holder and _name_match_count(verified_bank_holder, account_name) < 2:
+                    return jsonify({"error": "verified_bank_required"}), 400
+
+                cooldown_state = _deposit_cooldown_state(user_id)
+                cooling_balance = round(_parse_float(cooldown_state.get("cooling_balance")), 2)
+                withdrawable_balance = round(max(0.0, _wallet_balance(user_id) - cooling_balance), 2)
+                if amount > withdrawable_balance:
+                    return jsonify(
+                        {
+                            "error": "withdrawal_cooling_off_period",
+                            "detail": "Only deposits older than the cooldown window can be withdrawn.",
+                            "wallet_balance": round(_wallet_balance(user_id), 2),
+                            "withdrawable_balance": withdrawable_balance,
+                            "cooling_deposit_balance": cooling_balance,
+                            "cooldown_until": cooldown_state.get("withdrawal_cooldown_until"),
+                        }
+                    ), 400
+                cooldown_until = int(_parse_float(cooldown_state.get("withdrawal_cooldown_until")) or 0)
 
                 wallet_before = _wallet_balance(user_id)
                 if wallet_before < amount:
                     return jsonify({"error": "insufficient_wallet_balance"}), 400
                 next_wallet_balance = round(wallet_before - amount, 2)
+                deposit_rows = _deposit_requests_for_user(user_id)
+                withdrawal_rows = _withdrawal_requests_for_user(user_id)
+                deposits_today = _entries_for_day(deposit_rows)
+                withdrawals_today = _entries_for_day(withdrawal_rows)
+                daily_deposit_count = len(deposits_today)
+                daily_withdrawal_count = len(withdrawals_today)
+                daily_deposit_volume = round(sum(_parse_float(row.get("amount")) for row in deposits_today), 2)
+                daily_withdrawal_volume = round(sum(_parse_float(row.get("amount")) for row in withdrawals_today), 2)
+                risk_score, risk_flags = _risk_score_for_withdrawal(
+                    profile=profile,
+                    amount=amount,
+                    bank_name=bank_name,
+                    account_name=account_name,
+                    account_number=account_number,
+                    daily_deposit_count=daily_deposit_count,
+                    daily_deposit_volume=daily_deposit_volume,
+                    daily_withdrawal_count=daily_withdrawal_count,
+                    daily_withdrawal_volume=daily_withdrawal_volume,
+                    cooldown_until=cooldown_until or None,
+                )
+                review_level = _risk_review_level(amount)
+                request_ctx = _request_context()
                 profile_id = str(profile.get("id") or uuid.uuid4())
                 updated_profile = {
                     "userId": user_id,
@@ -1438,9 +2398,14 @@ def create_app() -> Flask:
                     "handle": profile.get("handle"),
                     "bio": profile.get("bio"),
                     "avatar_url": profile.get("avatar_url"),
+                    "email": profile.get("email"),
+                    "first_name": profile.get("first_name"),
+                    "last_name": profile.get("last_name"),
+                    "phone_number": effective_phone_number,
                     **_verification_fields(profile),
                     "walletBalance": next_wallet_balance,
                     "currency": profile.get("currency") or "NGN",
+                    "withdrawal_cooldown_until": cooldown_until or profile.get("withdrawal_cooldown_until") or profile.get("withdrawalCooldownUntil"),
                     "createdAt": profile.get("createdAt") or now_ms(),
                     "updatedAt": now_ms(),
                 }
@@ -1457,9 +2422,25 @@ def create_app() -> Flask:
                                 "userId": user_id,
                                 "amount": round(amount, 2),
                                 "status": "pending_review",
+                                "reviewLevel": review_level,
+                                "riskScore": risk_score,
+                                "riskFlags": risk_flags,
                                 "bankName": bank_name,
+                                "bankCode": bank_code or None,
                                 "accountName": account_name,
                                 "accountNumber": account_number,
+                                "phoneNumber": effective_phone_number,
+                                "verifiedName": display_name,
+                                "verifiedBankAccount": verified_bank_holder or None,
+                                "bankValidationStatus": profile.get("bank_validation_status") or profile.get("bankValidationStatus"),
+                                "verificationReference": profile.get("verification_reference") or profile.get("verificationReference"),
+                                "paystackCustomerCode": profile.get("paystack_customer_code") or profile.get("paystackCustomerCode"),
+                                "dailyDepositCount": daily_deposit_count,
+                                "dailyDepositVolume": daily_deposit_volume,
+                                "dailyWithdrawalCount": daily_withdrawal_count,
+                                "dailyWithdrawalVolume": daily_withdrawal_volume,
+                                "cooldownUntil": cooldown_until or None,
+                                **request_ctx,
                                 "note": "Withdrawal request submitted",
                                 "createdAt": created_at,
                                 "updatedAt": created_at,
@@ -1471,13 +2452,15 @@ def create_app() -> Flask:
                     {
                         "withdrawal": {
                             "id": request_id,
-                            "amount": round(amount, 2),
-                            "status": "pending_review",
-                            "bank_name": bank_name,
-                            "account_name": account_name,
-                            "account_number": account_number,
-                            "created_at": created_at,
-                        },
+                        "amount": round(amount, 2),
+                        "status": "pending_review",
+                        "bank_name": bank_name,
+                        "bank_code": bank_code or None,
+                        "account_name": account_name,
+                        "account_number": account_number,
+                        "phone_number": effective_phone_number,
+                        "created_at": created_at,
+                    },
                         "wallet_balance": _wallet_balance(user_id),
                     }
                 )
@@ -2398,6 +3381,7 @@ def create_app() -> Flask:
             events = _query_all_events()
             markets = {str(r.get("id")): r for r in _query_markets()}
             withdrawals = _as_list(admin_query({"withdrawal_requests": {}}).get("withdrawal_requests"))
+            deposits = _as_list(admin_query({"deposit_requests": {}}).get("deposit_requests"))
         except Exception as exc:
             return jsonify({"error": "admin_audit_failed", "detail": str(exc)}), 500
 
@@ -2417,10 +3401,18 @@ def create_app() -> Flask:
                 continue
             withdrawals_by_user_id.setdefault(str(user_id), []).append(row)
 
+        deposits_by_user_id: dict[str, list[dict[str, Any]]] = {}
+        for row in deposits:
+            user_id = row.get("userId")
+            if not user_id:
+                continue
+            deposits_by_user_id.setdefault(str(user_id), []).append(row)
+
         for user_id, profile in profiles_by_user_id.items():
             user_events = events_by_user_id.get(user_id, [])
             serial = _serialize_profile(profile, user_id)
             user_withdrawals = withdrawals_by_user_id.get(user_id, [])
+            user_deposits = deposits_by_user_id.get(user_id, [])
             users.append(
                 {
                     "user_id": user_id,
@@ -2434,6 +3426,7 @@ def create_app() -> Flask:
                     "id_document_type": serial.get("id_document_type"),
                     "id_document_image_path": serial.get("id_document_image_path"),
                     "id_document_url": _verification_file_url(serial.get("id_document_image_path")),
+                    "bvn_number": serial.get("bvn_number"),
                     "age_proof_type": serial.get("age_proof_type"),
                     "age_proof_image_path": serial.get("age_proof_image_path"),
                     "age_proof_url": _verification_file_url(serial.get("age_proof_image_path")),
@@ -2462,6 +3455,20 @@ def create_app() -> Flask:
                             "updated_at": row.get("updatedAt"),
                         }
                         for row in user_withdrawals
+                    ],
+                    "deposits": [
+                        {
+                            "id": row.get("id"),
+                            "reference": row.get("reference"),
+                            "amount": _parse_float(row.get("amount")),
+                            "status": row.get("status"),
+                            "paystack_status": row.get("paystackStatus"),
+                            "gateway_response": row.get("gatewayResponse"),
+                            "paid_at": row.get("paidAt"),
+                            "created_at": row.get("createdAt"),
+                            "updated_at": row.get("updatedAt"),
+                        }
+                        for row in user_deposits
                     ],
                     "transactions": [
                         {
@@ -2505,7 +3512,7 @@ def create_app() -> Flask:
                 or profile.get("verificationStatus")
                 or ("approved" if profile.get("verified") else "unsubmitted")
             ).lower()
-            if verification_status not in {"pending_review", "approved", "rejected"}:
+            if verification_status != "pending_review":
                 continue
             queue.append(
                 {
@@ -2515,6 +3522,7 @@ def create_app() -> Flask:
                     "verification_status": verification_status,
                     "verified": bool(profile.get("verified")),
                     "id_document_type": profile.get("id_document_type") or profile.get("idDocumentType"),
+                    "bvn_number": profile.get("bvn_number") or profile.get("bvnNumber"),
                     "document_url": _verification_file_url(profile.get("id_document_image_path") or profile.get("idDocumentImagePath")),
                     "age_proof_url": _verification_file_url(profile.get("age_proof_image_path") or profile.get("ageProofImagePath") or profile.get("birth_certificate_image_path") or profile.get("birthCertificateImagePath")),
                     "selfie_url": _verification_file_url(profile.get("selfie_image_path") or profile.get("selfieImagePath")),
@@ -2619,9 +3627,31 @@ def create_app() -> Flask:
                         "user_id": row.get("userId"),
                         "amount": _parse_float(row.get("amount")),
                         "status": row.get("status"),
+                        "review_level": row.get("reviewLevel") or row.get("review_level"),
+                        "risk_score": row.get("riskScore") or row.get("risk_score"),
+                        "risk_flags": row.get("riskFlags") or row.get("risk_flags"),
                         "bank_name": row.get("bankName"),
+                        "bank_code": row.get("bankCode"),
                         "account_name": row.get("accountName"),
                         "account_number": row.get("accountNumber"),
+                        "verified_name": row.get("verifiedName") or row.get("verified_name"),
+                        "verified_bank_account": row.get("verifiedBankAccount") or row.get("verified_bank_account"),
+                        "bank_validation_status": row.get("bankValidationStatus") or row.get("bank_validation_status"),
+                        "verification_reference": row.get("verificationReference") or row.get("verification_reference"),
+                        "paystack_customer_code": row.get("paystackCustomerCode") or row.get("paystack_customer_code"),
+                        "daily_deposit_count": row.get("dailyDepositCount") or row.get("daily_deposit_count"),
+                        "daily_deposit_volume": row.get("dailyDepositVolume") or row.get("daily_deposit_volume"),
+                        "daily_withdrawal_count": row.get("dailyWithdrawalCount") or row.get("daily_withdrawal_count"),
+                        "daily_withdrawal_volume": row.get("dailyWithdrawalVolume") or row.get("daily_withdrawal_volume"),
+                        "cooldown_until": row.get("cooldownUntil") or row.get("cooldown_until"),
+                        "ip_address": row.get("ipAddress") or row.get("ip_address"),
+                        "user_agent": row.get("userAgent") or row.get("user_agent"),
+                        "recipient_code": row.get("recipientCode") or row.get("recipient_code"),
+                        "transfer_reference": row.get("transferReference") or row.get("transfer_reference"),
+                        "transfer_status": row.get("transferStatus") or row.get("transfer_status"),
+                        "transfer_response": row.get("transferResponse") or row.get("transfer_response"),
+                        "approved_at": row.get("approvedAt") or row.get("approved_at"),
+                        "processed_at": row.get("processedAt") or row.get("processed_at"),
                         "note": row.get("note"),
                         "created_at": row.get("createdAt"),
                         "updated_at": row.get("updatedAt"),
@@ -2637,19 +3667,152 @@ def create_app() -> Flask:
         if not is_admin_user(g.clerk_user_id):
             return jsonify({"error": "forbidden"}), 403
         try:
-            data = admin_query({"withdrawal_requests": {"$": {"where": {"id": withdrawal_id}}}})
-            rows = _as_list(data.get("withdrawal_requests"))
-            row = rows[0] if rows else None
-            if not row:
-                return jsonify({"error": "not_found"}), 404
-            if str(row.get("status") or "").lower() in {"approved", "rejected", "paid"}:
-                return jsonify({"error": "already_processed"}), 400
-            payload = dict(row)
-            payload["status"] = "paid"
-            payload["note"] = "Withdrawal approved and finalized"
-            payload["updatedAt"] = now_ms()
-            admin_transact([["update", "withdrawal_requests", str(row.get("id")), payload]])
-            return jsonify({"ok": True, "withdrawal_id": withdrawal_id, "status": "paid"})
+            with trade_lock:
+                data = admin_query({"withdrawal_requests": {"$": {"where": {"id": withdrawal_id}}}})
+                rows = _as_list(data.get("withdrawal_requests"))
+                row = rows[0] if rows else None
+                if not row:
+                    return jsonify({"error": "not_found"}), 404
+                status = str(row.get("status") or "").lower()
+                if status in {"approved", "rejected", "paid", "failed"}:
+                    return jsonify({"error": "already_processed"}), 400
+                if status not in {"pending_review", "processing"}:
+                    return jsonify({"error": "invalid_status", "detail": status or "unknown"}), 400
+
+                user_id = str(row.get("userId") or "")
+                amount = round(_parse_float(row.get("amount")), 2)
+                if amount <= 0:
+                    return jsonify({"error": "invalid_amount"}), 400
+                profile = _query_profile(user_id) or {}
+                profile_id = str(profile.get("id") or uuid.uuid4())
+                wallet_before = _parse_float(profile.get("walletBalance")) or 0.0
+
+                bank_name = str(row.get("bankName") or profile.get("bank_name") or profile.get("bankName") or "").strip()
+                account_name = str(row.get("accountName") or profile.get("bank_account_name") or profile.get("bankAccountName") or "").strip()
+                account_number = str(row.get("accountNumber") or profile.get("bank_account_number") or profile.get("bankAccountNumber") or "").strip()
+                bank_code = str(
+                    row.get("bankCode")
+                    or profile.get("bank_code")
+                    or profile.get("bankCode")
+                    or ""
+                ).strip()
+                if not bank_code and bank_name:
+                    bank_code = _resolve_bank_code(bank_name) or ""
+                if not bank_code:
+                    return jsonify({"error": "bank_code_missing"}), 400
+                if not bank_name or not account_name or not account_number:
+                    return jsonify({"error": "missing_bank_details"}), 400
+
+                transfer_reference = str(row.get("transferReference") or row.get("transfer_reference") or "").strip()
+                if not transfer_reference:
+                    transfer_reference = f"sheybi_wd_{uuid.uuid4().hex[:24]}"
+
+                processing_payload = dict(row)
+                processing_payload.update(
+                    {
+                        "status": "processing",
+                        "approvedBy": g.clerk_user_id,
+                        "approvedAt": now_ms(),
+                        "transferReference": transfer_reference,
+                        "transferStatus": "initiating",
+                        "updatedAt": now_ms(),
+                    }
+                )
+                admin_transact([["update", "withdrawal_requests", str(row.get("id")), processing_payload]])
+                try:
+                    recipient_resp = _paystack_create_transfer_recipient(
+                        name=account_name,
+                        account_number=account_number,
+                        bank_code=bank_code,
+                    )
+                    recipient_data = recipient_resp.get("data") if isinstance(recipient_resp, dict) else {}
+                    recipient_code = str((recipient_data or {}).get("recipient_code") or "").strip()
+                    if not recipient_code:
+                        raise ValueError("paystack_transfer_recipient_missing")
+
+                    paystack_amount_kobo = int(round(amount * 100))
+                    transfer_resp = _paystack_initiate_transfer(
+                        amount_kobo=paystack_amount_kobo,
+                        recipient_code=recipient_code,
+                        reference=transfer_reference,
+                        reason=f"Withdrawal {withdrawal_id}",
+                    )
+                    transfer_data = transfer_resp.get("data") if isinstance(transfer_resp, dict) else {}
+                    transfer_status = str((transfer_data or {}).get("status") or transfer_resp.get("status") or "").lower()
+                    transfer_code = str((transfer_data or {}).get("transfer_code") or transfer_reference).strip()
+                    gateway_response = transfer_data.get("gateway_response") if isinstance(transfer_data, dict) else None
+                    if not transfer_status:
+                        transfer_status = "pending"
+
+                    if transfer_status in {"failed", "reversed", "declined", "error"}:
+                        raise ValueError(f"paystack_transfer_failed:{gateway_response or transfer_status}")
+
+                    final_status = "paid" if transfer_status in {"success", "successful", "sent", "processed"} else "processing"
+                    final_payload = dict(row)
+                    final_payload.update(
+                        {
+                            "status": final_status,
+                            "approvedBy": g.clerk_user_id,
+                            "approvedAt": processing_payload["approvedAt"],
+                            "processedAt": now_ms(),
+                            "recipientCode": recipient_code,
+                            "transferReference": transfer_code or transfer_reference,
+                            "transferStatus": transfer_status,
+                            "transferResponse": transfer_resp,
+                            "note": "Withdrawal transfer initiated" if final_status != "paid" else "Withdrawal transferred",
+                            "updatedAt": now_ms(),
+                        }
+                    )
+                    admin_transact([["update", "withdrawal_requests", str(row.get("id")), final_payload]])
+                    return jsonify(
+                        {
+                            "ok": True,
+                            "withdrawal_id": withdrawal_id,
+                            "status": final_status,
+                            "transfer_status": transfer_status,
+                            "recipient_code": recipient_code,
+                            "transfer_reference": transfer_code or transfer_reference,
+                        }
+                    )
+                except Exception as transfer_exc:
+                    next_balance = round(wallet_before + amount, 2)
+                    refund_payload = {
+                        "userId": user_id,
+                        "display_name": profile.get("display_name"),
+                        "handle": profile.get("handle"),
+                        "bio": profile.get("bio"),
+                        "avatar_url": profile.get("avatar_url"),
+                        "email": profile.get("email"),
+                        "first_name": profile.get("first_name"),
+                        "last_name": profile.get("last_name"),
+                        "phone_number": profile.get("phone_number") or profile.get("phoneNumber"),
+                        **_verification_fields(profile),
+                        "walletBalance": next_balance,
+                        "currency": profile.get("currency") or "NGN",
+                        "createdAt": profile.get("createdAt") or now_ms(),
+                        "updatedAt": now_ms(),
+                    }
+                    fail_payload = dict(row)
+                    fail_payload.update(
+                        {
+                            "status": "failed",
+                            "approvedBy": g.clerk_user_id,
+                            "approvedAt": processing_payload["approvedAt"],
+                            "processedAt": now_ms(),
+                            "transferReference": transfer_reference,
+                            "transferStatus": "failed",
+                            "transferResponse": {"error": str(transfer_exc)},
+                            "note": f"Transfer failed: {transfer_exc}",
+                            "updatedAt": now_ms(),
+                        }
+                    )
+                    admin_transact(
+                        [
+                            ["update", "profiles", profile_id, refund_payload],
+                            ["update", "withdrawal_requests", str(row.get("id")), fail_payload],
+                        ]
+                    )
+                    return jsonify({"error": "withdrawal_transfer_failed", "detail": str(transfer_exc)}), 400
         except Exception as exc:
             return jsonify({"error": "withdrawal_approve_failed", "detail": str(exc)}), 500
 

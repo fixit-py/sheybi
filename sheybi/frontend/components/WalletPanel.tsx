@@ -1,28 +1,53 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAuth } from "@clerk/nextjs";
 
 type WalletResponse = {
   user_id: string;
   wallet_balance: number;
+  withdrawable_balance?: number | null;
+  cooling_deposit_balance?: number | null;
   currency: string;
   display_name?: string | null;
   handle?: string | null;
+  phone_number?: string | null;
   verification_status?: string | null;
   verification_ready?: boolean | null;
+  withdrawal_cooldown_until?: number | string | null;
 };
 
 type WithdrawalItem = {
   id: string;
   amount: number;
   status: string | null;
+  review_level?: string | null;
+  risk_score?: number | string | null;
+  risk_flags?: string[] | string | null;
   bank_name: string | null;
   account_name: string | null;
   account_number: string | null;
+  verified_name?: string | null;
+  verified_bank_account?: string | null;
+  bank_validation_status?: string | null;
+  verification_reference?: string | null;
+  paystack_customer_code?: string | null;
+  daily_deposit_count?: number | string | null;
+  daily_deposit_volume?: number | string | null;
+  daily_withdrawal_count?: number | string | null;
+  daily_withdrawal_volume?: number | string | null;
+  cooldown_until?: number | string | null;
+  transfer_status?: string | null;
+  transfer_reference?: string | null;
+  recipient_code?: string | null;
   note: string | null;
   created_at: number | string | null;
   updated_at: number | string | null;
+};
+
+type BankOption = {
+  name: string;
+  code: string;
 };
 
 async function readJson(res: Response) {
@@ -50,9 +75,12 @@ export default function WalletPanel() {
   const [submitBusy, setSubmitBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [amount, setAmount] = useState("");
+  const [bankOptions, setBankOptions] = useState<BankOption[]>([]);
+  const [bankSearch, setBankSearch] = useState("");
   const [bankName, setBankName] = useState("");
   const [accountName, setAccountName] = useState("");
   const [accountNumber, setAccountNumber] = useState("");
+  const [phoneNumber, setPhoneNumber] = useState("");
   const [submitMessage, setSubmitMessage] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -63,18 +91,26 @@ export default function WalletPanel() {
       const headers = {
         Authorization: token ? `Bearer ${token}` : "",
       };
-      const [meRes, withdrawalsRes] = await Promise.all([
+      const [meRes, withdrawalsRes, banksRes] = await Promise.all([
         fetch("/api/flask/me", { headers, cache: "no-store" }),
         fetch("/api/flask/me/withdrawals", { headers, cache: "no-store" }),
+        fetch("/api/flask/paystack/banks", { headers, cache: "no-store" }),
       ]);
       const meJson = (await readJson(meRes)) as WalletResponse;
       const withdrawalsJson = await readJson(withdrawalsRes);
+      const banksJson = (await readJson(banksRes)) as { banks?: BankOption[] };
       if (!meRes.ok) throw new Error((meJson as { error?: string })?.error || `HTTP ${meRes.status}`);
       if (!withdrawalsRes.ok) {
         throw new Error((withdrawalsJson as { error?: string })?.error || `HTTP ${withdrawalsRes.status}`);
       }
+      if (!banksRes.ok) {
+        throw new Error((banksJson as { error?: string })?.error || `HTTP ${banksRes.status}`);
+      }
       setData(meJson);
       setWithdrawals(((withdrawalsJson as { withdrawals?: WithdrawalItem[] })?.withdrawals ?? []) as WithdrawalItem[]);
+      const nextBanks = (banksJson.banks ?? []).filter((bank) => bank?.name && bank?.code);
+      setBankOptions(nextBanks);
+      setPhoneNumber(meJson.phone_number ?? "");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -95,6 +131,17 @@ export default function WalletPanel() {
       setError("Enter a withdrawal amount.");
       return;
     }
+    if (!bankName) {
+      setError("Pick a bank from the list.");
+      return;
+    }
+    const nextWithdrawable = Number(data?.withdrawable_balance ?? data?.wallet_balance ?? 0);
+    if (nextAmount > nextWithdrawable) {
+      setError(
+        `Only ${money(nextWithdrawable, data?.currency ?? "NGN")} is withdrawable right now.`,
+      );
+      return;
+    }
     setSubmitBusy(true);
     setError(null);
     setSubmitMessage(null);
@@ -111,6 +158,7 @@ export default function WalletPanel() {
           bank_name: bankName,
           account_name: accountName,
           account_number: accountNumber,
+          phone_number: phoneNumber || data?.phone_number || "",
         }),
       });
       const json = await readJson(res);
@@ -122,6 +170,7 @@ export default function WalletPanel() {
       setBankName("");
       setAccountName("");
       setAccountNumber("");
+      setPhoneNumber("");
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -132,6 +181,18 @@ export default function WalletPanel() {
 
   const status = data?.verification_status || "unsubmitted";
   const canWithdraw = data?.verification_ready || status === "approved";
+  const withdrawableBalance = Number(data?.withdrawable_balance ?? data?.wallet_balance ?? 0);
+  const coolingBalance = Number(data?.cooling_deposit_balance ?? 0);
+  const coolingActive = coolingBalance > 0.01 && withdrawableBalance < Number(data?.wallet_balance ?? 0);
+  const selectedBank = useMemo(
+    () => bankOptions.find((bank) => bank.name === bankName) ?? null,
+    [bankName, bankOptions],
+  );
+  const filteredBanks = useMemo(() => {
+    const term = bankSearch.trim().toLowerCase();
+    if (!term) return bankOptions;
+    return bankOptions.filter((bank) => bank.name.toLowerCase().includes(term) || bank.code.toLowerCase().includes(term));
+  }, [bankOptions, bankSearch]);
 
   return (
     <section className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-black">
@@ -183,11 +244,15 @@ export default function WalletPanel() {
             </div>
             <div className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">
               {canWithdraw
-                ? "Withdrawal requests will be queued for review."
+                ? coolingActive
+                  ? `₦${coolingBalance.toLocaleString()} is still cooling off. You can withdraw ₦${withdrawableBalance.toLocaleString()} right now.`
+                  : "Withdrawal requests will be queued for review."
                 : "Complete verification in the Verification tab before requesting a withdrawal."}
             </div>
             <div className="mt-3 text-xs text-zinc-500 dark:text-zinc-400">
               Status: {status}
+              {" "}
+              {canWithdraw ? `· Withdrawable ${money(withdrawableBalance, data?.currency ?? "NGN")}` : ""}
             </div>
           </div>
         </div>
@@ -211,14 +276,47 @@ export default function WalletPanel() {
               />
             </label>
             <label className="grid gap-1 text-sm text-zinc-700 dark:text-zinc-300">
-              Bank name
+              Select bank
               <input
-                value={bankName}
-                onChange={(e) => setBankName(e.target.value)}
+                value={bankSearch}
+                onChange={(e) => setBankSearch(e.target.value)}
                 className="h-11 rounded-xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
-                placeholder="e.g. Access Bank"
+                placeholder="Search your bank"
               />
             </label>
+            <div className="max-h-48 overflow-auto rounded-xl border border-zinc-200 dark:border-zinc-800">
+              {filteredBanks.length ? (
+                <div className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                  {filteredBanks.map((bank) => {
+                    const active = bank.name === bankName;
+                    return (
+                      <button
+                        type="button"
+                        key={`${bank.code}-${bank.name}`}
+                        onClick={() => {
+                          setBankName(bank.name);
+                          setBankSearch(bank.name);
+                        }}
+                        className={`flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm transition-colors ${
+                          active
+                            ? "bg-zinc-950 text-white dark:bg-zinc-100 dark:text-zinc-950"
+                            : "bg-white text-zinc-800 hover:bg-zinc-50 dark:bg-black dark:text-zinc-200 dark:hover:bg-zinc-900"
+                        }`}
+                      >
+                        <span className="min-w-0 truncate">{bank.name}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+            ) : (
+                <div className="px-4 py-3 text-sm text-zinc-500 dark:text-zinc-400">
+                  No banks matched your search.
+                </div>
+              )}
+            </div>
+            <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
+              Selected: {selectedBank ? selectedBank.name : "—"}
+            </div>
             <label className="grid gap-1 text-sm text-zinc-700 dark:text-zinc-300">
               Account name
               <input
@@ -235,6 +333,16 @@ export default function WalletPanel() {
                 onChange={(e) => setAccountNumber(e.target.value)}
                 className="h-11 rounded-xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
                 placeholder="e.g. 0123456789"
+              />
+            </label>
+            <label className="grid gap-1 text-sm text-zinc-700 dark:text-zinc-300">
+              Phone number
+              <input
+                inputMode="tel"
+                value={phoneNumber}
+                onChange={(e) => setPhoneNumber(e.target.value)}
+                className="h-11 rounded-xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
+                placeholder="e.g. 08012345678"
               />
             </label>
           </div>
@@ -257,7 +365,7 @@ export default function WalletPanel() {
         <div className="mt-3 overflow-hidden rounded-2xl border border-zinc-200 dark:border-zinc-800">
           {withdrawals.length ? (
             <div className="divide-y divide-zinc-200 dark:divide-zinc-800">
-              {withdrawals.map((item) => (
+                  {withdrawals.map((item) => (
                 <div key={item.id} className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
                   <div>
                     <div className="text-sm font-medium text-zinc-900 dark:text-zinc-50">
@@ -265,6 +373,26 @@ export default function WalletPanel() {
                     </div>
                     <div className="text-xs text-zinc-500 dark:text-zinc-400">
                       {item.account_name || "—"} · {item.account_number || "—"}
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-2 text-[11px] uppercase tracking-[0.16em] text-zinc-500 dark:text-zinc-400">
+                      <span className="rounded-full border border-zinc-200 px-2 py-1 dark:border-zinc-800">
+                        {item.review_level || "manual"}
+                      </span>
+                      {item.risk_score != null ? (
+                        <span className="rounded-full border border-zinc-200 px-2 py-1 dark:border-zinc-800">
+                          Risk {Number(item.risk_score)}
+                        </span>
+                      ) : null}
+                      {item.cooldown_until ? (
+                        <span className="rounded-full border border-zinc-200 px-2 py-1 dark:border-zinc-800">
+                          Cooling off
+                        </span>
+                      ) : null}
+                      {item.transfer_status ? (
+                        <span className="rounded-full border border-zinc-200 px-2 py-1 dark:border-zinc-800">
+                          Transfer {item.transfer_status}
+                        </span>
+                      ) : null}
                     </div>
                   </div>
                   <div className="text-right">
@@ -274,6 +402,11 @@ export default function WalletPanel() {
                     <div className="text-xs text-zinc-500 dark:text-zinc-400">
                       {item.note || "—"}
                     </div>
+                    {item.transfer_reference ? (
+                      <div className="text-[11px] text-zinc-400 dark:text-zinc-500">
+                        Ref {item.transfer_reference}
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               ))}

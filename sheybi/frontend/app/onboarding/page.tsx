@@ -109,6 +109,9 @@ export default function OnboardingPage() {
         body: JSON.stringify({
           display_name: nextDisplayName,
           handle: nextHandle,
+          email: user?.primaryEmailAddress?.emailAddress || user?.emailAddresses?.[0]?.emailAddress || "",
+          first_name: user?.firstName || "",
+          last_name: user?.lastName || "",
           terms_accepted: true,
         }),
       });
