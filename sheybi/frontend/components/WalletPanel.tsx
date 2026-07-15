@@ -80,7 +80,6 @@ export default function WalletPanel() {
   const [bankName, setBankName] = useState("");
   const [accountName, setAccountName] = useState("");
   const [accountNumber, setAccountNumber] = useState("");
-  const [phoneNumber, setPhoneNumber] = useState("");
   const [submitMessage, setSubmitMessage] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -110,7 +109,6 @@ export default function WalletPanel() {
       setWithdrawals(((withdrawalsJson as { withdrawals?: WithdrawalItem[] })?.withdrawals ?? []) as WithdrawalItem[]);
       const nextBanks = (banksJson.banks ?? []).filter((bank) => bank?.name && bank?.code);
       setBankOptions(nextBanks);
-      setPhoneNumber(meJson.phone_number ?? "");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -158,7 +156,6 @@ export default function WalletPanel() {
           bank_name: bankName,
           account_name: accountName,
           account_number: accountNumber,
-          phone_number: phoneNumber || data?.phone_number || "",
         }),
       });
       const json = await readJson(res);
@@ -170,7 +167,6 @@ export default function WalletPanel() {
       setBankName("");
       setAccountName("");
       setAccountNumber("");
-      setPhoneNumber("");
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -182,8 +178,6 @@ export default function WalletPanel() {
   const status = data?.verification_status || "unsubmitted";
   const canWithdraw = data?.verification_ready || status === "approved";
   const withdrawableBalance = Number(data?.withdrawable_balance ?? data?.wallet_balance ?? 0);
-  const coolingBalance = Number(data?.cooling_deposit_balance ?? 0);
-  const coolingActive = coolingBalance > 0.01 && withdrawableBalance < Number(data?.wallet_balance ?? 0);
   const selectedBank = useMemo(
     () => bankOptions.find((bank) => bank.name === bankName) ?? null,
     [bankName, bankOptions],
@@ -200,9 +194,6 @@ export default function WalletPanel() {
         <div>
           <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
             Wallet
-          </div>
-          <div className="text-xs text-zinc-500 dark:text-zinc-400">
-            
           </div>
         </div>
         <button
@@ -240,19 +231,25 @@ export default function WalletPanel() {
 
           <div className="rounded-2xl bg-zinc-50 p-5 dark:bg-zinc-900">
             <div className="text-xs uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
-              Withdrawal gate
+              Balances
             </div>
-            <div className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">
-              {canWithdraw
-                ? coolingActive
-                  ? `₦${coolingBalance.toLocaleString()} is still cooling off. You can withdraw ₦${withdrawableBalance.toLocaleString()} right now.`
-                  : "Withdrawal requests will be queued for review."
-                : "Complete verification in the Verification tab before requesting a withdrawal."}
-            </div>
-            <div className="mt-3 text-xs text-zinc-500 dark:text-zinc-400">
-              Status: {status}
-              {" "}
-              {canWithdraw ? `· Withdrawable ${money(withdrawableBalance, data?.currency ?? "NGN")}` : ""}
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <div className="rounded-2xl bg-white p-4 dark:bg-black">
+                <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
+                  Total balance
+                </div>
+                <div className="mt-2 text-2xl font-semibold text-zinc-900 dark:text-zinc-50">
+                  {money(data?.wallet_balance ?? 0, data?.currency ?? "NGN")}
+                </div>
+              </div>
+              <div className="rounded-2xl bg-white p-4 dark:bg-black">
+                <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
+                  Withdrawable
+                </div>
+                <div className="mt-2 text-2xl font-semibold text-zinc-900 dark:text-zinc-50">
+                  {money(withdrawableBalance, data?.currency ?? "NGN")}
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -262,7 +259,7 @@ export default function WalletPanel() {
             Request withdrawal
           </div>
           <div className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-            Name on the bank account must match at least two parts of your profile name.
+            
           </div>
           <div className="mt-4 grid gap-3">
             <label className="grid gap-1 text-sm text-zinc-700 dark:text-zinc-300">
@@ -276,12 +273,12 @@ export default function WalletPanel() {
               />
             </label>
             <label className="grid gap-1 text-sm text-zinc-700 dark:text-zinc-300">
-              Select bank
+              Bank
               <input
                 value={bankSearch}
                 onChange={(e) => setBankSearch(e.target.value)}
                 className="h-11 rounded-xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
-                placeholder="Search your bank"
+                placeholder="Search banks"
               />
             </label>
             <div className="max-h-48 overflow-auto rounded-xl border border-zinc-200 dark:border-zinc-800">
@@ -314,8 +311,13 @@ export default function WalletPanel() {
                 </div>
               )}
             </div>
-            <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
-              Selected: {selectedBank ? selectedBank.name : "—"}
+            <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3 dark:border-zinc-800 dark:bg-zinc-900">
+              <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
+                Selected bank
+              </div>
+              <div className="mt-1 text-sm font-medium text-zinc-900 dark:text-zinc-50">
+                {selectedBank ? selectedBank.name : "Select a bank to continue"}
+              </div>
             </div>
             <label className="grid gap-1 text-sm text-zinc-700 dark:text-zinc-300">
               Account name
@@ -333,16 +335,6 @@ export default function WalletPanel() {
                 onChange={(e) => setAccountNumber(e.target.value)}
                 className="h-11 rounded-xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
                 placeholder="e.g. 0123456789"
-              />
-            </label>
-            <label className="grid gap-1 text-sm text-zinc-700 dark:text-zinc-300">
-              Phone number
-              <input
-                inputMode="tel"
-                value={phoneNumber}
-                onChange={(e) => setPhoneNumber(e.target.value)}
-                className="h-11 rounded-xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
-                placeholder="e.g. 08012345678"
               />
             </label>
           </div>
@@ -375,19 +367,6 @@ export default function WalletPanel() {
                       {item.account_name || "—"} · {item.account_number || "—"}
                     </div>
                     <div className="mt-1 flex flex-wrap gap-2 text-[11px] uppercase tracking-[0.16em] text-zinc-500 dark:text-zinc-400">
-                      <span className="rounded-full border border-zinc-200 px-2 py-1 dark:border-zinc-800">
-                        {item.review_level || "manual"}
-                      </span>
-                      {item.risk_score != null ? (
-                        <span className="rounded-full border border-zinc-200 px-2 py-1 dark:border-zinc-800">
-                          Risk {Number(item.risk_score)}
-                        </span>
-                      ) : null}
-                      {item.cooldown_until ? (
-                        <span className="rounded-full border border-zinc-200 px-2 py-1 dark:border-zinc-800">
-                          Cooling off
-                        </span>
-                      ) : null}
                       {item.transfer_status ? (
                         <span className="rounded-full border border-zinc-200 px-2 py-1 dark:border-zinc-800">
                           Transfer {item.transfer_status}

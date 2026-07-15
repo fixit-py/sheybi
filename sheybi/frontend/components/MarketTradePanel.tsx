@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@clerk/nextjs";
+import { useCallback, useEffect, useState } from "react";
 import MarketCountdown from "@/components/MarketCountdown";
 
 type MarketOption = {
@@ -50,7 +50,7 @@ function money(value: number) {
 }
 
 export default function MarketTradePanel({ marketId }: { marketId: string }) {
-  const { getToken } = useAuth();
+  const { getToken, isLoaded, isSignedIn } = useAuth();
   const [market, setMarket] = useState<MarketResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -60,9 +60,12 @@ export default function MarketTradePanel({ marketId }: { marketId: string }) {
     setError(null);
     try {
       const token = await getToken();
-      const headers: HeadersInit = {};
-      if (token) headers.Authorization = `Bearer ${token}`;
-      const res = await fetch(`/api/flask/markets/${marketId}`, { headers });
+      const res = await fetch(`/api/flask/markets/${marketId}`, {
+        cache: "no-store",
+        headers: {
+          Authorization: token ? `Bearer ${token}` : "",
+        },
+      });
       const json = await readJson(res);
       if (!res.ok) throw new Error(`market HTTP ${res.status}`);
       setMarket(json as MarketResponse);
@@ -74,6 +77,9 @@ export default function MarketTradePanel({ marketId }: { marketId: string }) {
   }, [getToken, marketId]);
 
   useEffect(() => {
+    if (!isLoaded || !isSignedIn) {
+      return;
+    }
     const initialTimer = window.setTimeout(() => {
       void load();
     }, 0);
@@ -84,7 +90,7 @@ export default function MarketTradePanel({ marketId }: { marketId: string }) {
       window.clearTimeout(initialTimer);
       window.clearInterval(intervalTimer);
     };
-  }, [load]);
+  }, [isLoaded, isSignedIn, load]);
 
   return (
     <section className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-black sm:p-6">

@@ -1,8 +1,6 @@
 import type { Metadata } from "next";
-import { ClerkProvider } from "@clerk/nextjs";
 
-import { AppShell } from "@/components/AppShell";
-import { InstantProvider } from "@/components/instant-provider";
+import { RouteProviders } from "@/components/route-providers";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -21,11 +19,7 @@ export default async function RootLayout({
       className="h-full font-sans antialiased"
     >
       <body className="flex min-h-full flex-col">
-        <ClerkProvider>
-          <InstantProvider>
-            <AppShell>{children}</AppShell>
-          </InstantProvider>
-        </ClerkProvider>
+        <RouteProviders>{children}</RouteProviders>
       </body>
     </html>
   );

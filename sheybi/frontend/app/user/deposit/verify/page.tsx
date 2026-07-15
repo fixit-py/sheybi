@@ -82,7 +82,7 @@ export default function DepositVerifyPage() {
         }
         if (!active) return;
         setState("loading");
-        setMessage("Payment received. Waiting for confirmation...");
+        setMessage("Confirming payment...");
         pollTimer = window.setTimeout(() => {
           void pollDeposit(reference);
         }, 1500);

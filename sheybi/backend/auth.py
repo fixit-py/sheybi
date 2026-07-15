@@ -35,9 +35,9 @@ def _decode_unverified_claims(token: str) -> dict:
 def require_auth(f):
     @wraps(f)
     def wrapped(*args, **kwargs):
-        # Dev bypass (explicitly opt-in).
-        # When DEV_AUTH=1, you can pass X-Dev-User-Id (and optional X-Dev-User-Name)
-        # instead of a Clerk JWT. Never enable in production.
+        # Dev bypass is explicit and off by default.
+        # When DEV_AUTH is enabled, you can pass X-Dev-User-Id (and optional X-Dev-User-Name)
+        # instead of a Clerk JWT. Never enable it in production.
         if os.getenv("DEV_AUTH", "").strip() in ("1", "true", "TRUE", "yes", "YES"):
             dev_user = (request.headers.get("X-Dev-User-Id") or "").strip()
             if dev_user:

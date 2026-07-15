@@ -226,8 +226,6 @@ export default function MarketDemo({ mode }: { mode: Mode }) {
   const { getToken } = useAuth();
   const { user } = useUser();
   const [appDisplayName, setAppDisplayName] = useState<string>("");
-  const [devUserId, setDevUserId] = useState<string>("");
-  const [devUserName, setDevUserName] = useState<string>("");
 
   const [markets, setMarkets] = useState<MarketSummary[]>([]);
   const [selectedMarketId, setSelectedMarketId] = useState<string>("");
@@ -268,12 +266,8 @@ export default function MarketDemo({ mode }: { mode: Mode }) {
       "Content-Type": "application/json",
       "X-User-Name": displayName,
     };
-    if (devUserId.trim()) {
-      headers["X-Dev-User-Id"] = devUserId.trim();
-      if (devUserName.trim()) headers["X-Dev-User-Name"] = devUserName.trim();
-    }
     return headers;
-  }, [getToken, appDisplayName, user, devUserId, devUserName]);
+  }, [getToken, appDisplayName, user]);
 
   const setMarketsFromInstant = useCallback((nextMarkets: MarketSummary[]) => {
     setMarkets(nextMarkets);
@@ -450,36 +444,6 @@ export default function MarketDemo({ mode }: { mode: Mode }) {
           onOrderbook={setOrderbook}
         />
         <div className="flex flex-col gap-3">
-          <div className="rounded-xl border border-zinc-200 p-4 dark:border-zinc-800">
-            <div className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-50">
-              Dev user switcher (optional)
-            </div>
-            <div className="grid grid-cols-1 gap-3">
-              <label className="grid gap-1 text-sm text-zinc-700 dark:text-zinc-300">
-                X-Dev-User-Id
-                <input
-                  type="text"
-                  value={devUserId}
-                  onChange={(e) => setDevUserId(e.target.value)}
-                  className="h-10 w-full rounded-lg border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
-                  placeholder="e.g. dev_alice"
-                />
-              </label>
-              <label className="grid gap-1 text-sm text-zinc-700 dark:text-zinc-300">
-                X-Dev-User-Name
-                <input
-                  type="text"
-                  value={devUserName}
-                  onChange={(e) => setDevUserName(e.target.value)}
-                  className="h-10 w-full rounded-lg border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
-                  placeholder="e.g. Alice"
-                />
-              </label>
-              <div className="text-xs text-zinc-500 dark:text-zinc-400">
-                Requires backend `DEV_AUTH=1`. Leave blank to use Clerk auth.
-              </div>
-            </div>
-          </div>
           {mode === "admin" ? (
             <div className="rounded-xl border border-zinc-200 p-4 dark:border-zinc-800">
               <div className="mb-3 text-sm font-semibold text-zinc-900 dark:text-zinc-50">

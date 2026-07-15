@@ -11,6 +11,8 @@ import { AuthHeader } from "@/components/AuthHeader";
 import MobileNav from "@/components/MobileNav";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 
+const COMPLETION_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 export function AppShell({ children }: { children: ReactNode }) {
   const { isLoaded, isSignedIn, getToken } = useAuth();
   const pathname = usePathname();
@@ -45,35 +47,61 @@ export function AppShell({ children }: { children: ReactNode }) {
         });
         const json = (await res.json().catch(() => null)) as
           | {
-              display_name?: string | null;
+              first_name?: string | null;
+              last_name?: string | null;
               handle?: string | null;
+              phone_number?: string | null;
               terms_accepted?: boolean | null;
             }
           | null;
         if (!active || !res.ok || !json) return;
-        const hasName = !!json.display_name?.trim();
+        const hasFirstName = !!json.first_name?.trim();
+        const hasLastName = !!json.last_name?.trim();
         const hasHandle = !!json.handle?.trim();
+        const hasPhoneNumber = !!json.phone_number?.trim();
         const termsAccepted = !!json.terms_accepted;
+        let recentOnboardingCompletion = false;
+        try {
+          const raw = window.sessionStorage.getItem("sheybi_onboarding_completed_at");
+        if (raw) {
+          const stamp = Number(raw);
+            recentOnboardingCompletion = Number.isFinite(stamp) && Date.now() - stamp < COMPLETION_WINDOW_MS;
+          }
+        } catch {
+          recentOnboardingCompletion = false;
+        }
         let recentTermsAcceptance = false;
         if (!termsAccepted) {
           try {
             const raw = window.sessionStorage.getItem("sheybi_terms_accepted_at");
             if (raw) {
               const stamp = Number(raw);
-              recentTermsAcceptance = Number.isFinite(stamp) && Date.now() - stamp < 2 * 60 * 1000;
+              recentTermsAcceptance = Number.isFinite(stamp) && Date.now() - stamp < COMPLETION_WINDOW_MS;
             }
           } catch {
             recentTermsAcceptance = false;
           }
         }
         const normalizedTermsAccepted = termsAccepted || recentTermsAcceptance;
-        const complete = hasName && hasHandle && normalizedTermsAccepted;
+        const profileReady = hasFirstName && hasLastName && hasHandle && hasPhoneNumber;
+        const normalizedProfileReady = profileReady || recentOnboardingCompletion;
+        const complete = normalizedProfileReady && normalizedTermsAccepted;
         setProfileComplete(complete);
         setProfileChecked(true);
-        if (!hasName || !hasHandle) {
-          router.replace("/onboarding");
-        } else if (!normalizedTermsAccepted) {
-          router.replace("/terms");
+        if (!complete) {
+          if (!normalizedProfileReady) {
+            if (recentOnboardingCompletion && pathname.startsWith("/user")) {
+              setProfileComplete(true);
+              return;
+            }
+            router.replace("/onboarding");
+          } else {
+            if (recentTermsAcceptance && pathname.startsWith("/user")) {
+              setProfileComplete(true);
+              return;
+            }
+            router.replace("/terms");
+          }
         }
       } catch {
         if (!active) return;

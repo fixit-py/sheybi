@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useAuth, useUser } from "@clerk/nextjs";
-import { ArrowRightIcon, BadgeCheckIcon, Clock3Icon, Loader2Icon } from "lucide-react";
+import { ArrowRightIcon, Clock3Icon, Loader2Icon } from "lucide-react";
 
 type ProfileResponse = {
   wallet_balance?: number;
@@ -17,7 +17,6 @@ type DepositItem = {
   amount: number;
   amount_kobo: number;
   status: string | null;
-  gateway_response: string | null;
   paid_at: string | number | null;
   created_at: string | number | null;
   updated_at: string | number | null;
@@ -204,23 +203,22 @@ export default function DepositPage() {
         amount: amountKobo,
         ref: reference,
         currency: "NGN",
-        callback: () => {
-          void (async () => {
-            try {
-              const token = await getToken();
-              await fetch("/api/flask/paystack/deposits/confirm", {
+              callback: () => {
+                void (async () => {
+                  try {
+                    const token = await getToken();
+                    await fetch("/api/flask/paystack/deposits/confirm", {
                 method: "POST",
                 headers: {
                   Authorization: token ? `Bearer ${token}` : "",
                   "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                  reference,
-                  transaction_id: reference,
-                  gateway_response: "browser_callback_confirmed",
-                }),
-              });
-            } catch {
+                      },
+                      body: JSON.stringify({
+                        reference,
+                        transaction_id: reference,
+                      }),
+                    });
+                  } catch {
               // The verify page will keep polling the local record if this request fails.
             } finally {
               window.location.assign(`/user/deposit/verify?reference=${encodeURIComponent(reference)}`);
@@ -247,7 +245,7 @@ export default function DepositPage() {
             Deposit
           </p>
           <h1 className="text-3xl font-semibold tracking-tight text-zinc-950 dark:text-zinc-50">
-            Add funds with Paystack
+            Deposit funds
           </h1>
           <p className="max-w-2xl text-sm leading-6 text-zinc-600 dark:text-zinc-400">
             Enter an amount and we will take you to Paystack. Once Paystack confirms the payment, your wallet is
@@ -263,9 +261,6 @@ export default function DepositPage() {
               </div>
               <div className="mt-2 text-3xl font-semibold text-zinc-900 dark:text-zinc-50">
                 {money(profile?.wallet_balance ?? 0, profile?.currency ?? "NGN")}
-              </div>
-              <div className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
-                {user?.fullName ? `Signed in as ${user.fullName}` : "Signed in"}
               </div>
             </div>
 
@@ -325,17 +320,6 @@ export default function DepositPage() {
           </div>
 
           <div className="space-y-3">
-            <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-5 dark:border-zinc-800 dark:bg-zinc-900">
-              <div className="flex items-center gap-2 text-sm font-semibold text-zinc-900 dark:text-zinc-50">
-                <BadgeCheckIcon className="size-4" />
-                How it works
-              </div>
-              <ol className="mt-3 space-y-3 text-sm leading-6 text-zinc-600 dark:text-zinc-400">
-                <li>1. Enter the amount you want to deposit.</li>
-                <li>2. Paystack opens in a secure checkout.</li>
-                <li>3. When payment succeeds, your wallet updates automatically.</li>
-              </ol>
-            </div>
             <div className="rounded-2xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-black">
               <div className="flex items-center gap-2 text-sm font-semibold text-zinc-900 dark:text-zinc-50">
                 <Clock3Icon className="size-4" />
@@ -364,7 +348,9 @@ export default function DepositPage() {
                         <span>{formatTime(item.created_at)}</span>
                       </div>
                       <div className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
-                        {item.gateway_response ? `Gateway: ${item.gateway_response}` : "Waiting for confirmation"}
+                        {item.status && ["paid", "completed", "credited", "success"].includes(item.status.toLowerCase())
+                          ? "Payment confirmed"
+                          : "Waiting for confirmation"}
                       </div>
                     </div>
                   ))

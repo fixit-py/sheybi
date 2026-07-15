@@ -38,7 +38,7 @@ function money(value: number, currency: string) {
 }
 
 const items = [
-  { href: "/", label: "Home", icon: HomeIcon },
+  { href: "/user", label: "Home", icon: HomeIcon },
   { href: "/user/portfolio", label: "Portfolio", icon: TrendingUpIcon },
   { href: "/user/history", label: "History", icon: CircleHelpIcon },
   { href: "/user/wallet", label: "Wallet", icon: WalletIcon },
@@ -96,7 +96,7 @@ export default function MobileNav() {
         </div>
         <div className="grid grid-cols-6 gap-1">
           {items.map((item) => {
-            const active = pathname === item.href || (item.href !== "/" && pathname.startsWith(item.href));
+            const active = pathname === item.href || pathname.startsWith(item.href);
             return (
               <Link
                 key={item.href}

@@ -8,8 +8,7 @@ export default function SettingsPage() {
       </h1>
       <ProfileEditor />
       <section className="rounded-3xl border border-zinc-200 bg-white p-5 text-sm text-zinc-700 shadow-sm dark:border-zinc-800 dark:bg-black dark:text-zinc-300 sm:p-6">
-        This page is for your in-app profile only. Update your name and user
-        tag here when needed. Verification status has its own tab.
+        Update your profile details here. Verification has its own tab.
       </section>
     </main>
   );

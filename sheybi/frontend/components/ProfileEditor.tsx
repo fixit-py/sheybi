@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { useAuth, useUser } from "@clerk/nextjs";
+import { PencilIcon } from "lucide-react";
 
 import { db, hasInstantConfig } from "@/lib/instant";
 
@@ -9,9 +10,12 @@ type Profile = {
   user_id: string;
   display_name: string | null;
   handle: string | null;
-  bio: string | null;
-  avatar_url: string | null;
+  email?: string | null;
+  secondary_email?: string | null;
   phone_number: string | null;
+  first_name?: string | null;
+  middle_name?: string | null;
+  last_name?: string | null;
   verified: boolean;
   created_at?: string | null;
   updated_at?: string | null;
@@ -22,11 +26,16 @@ type InstantProfile = {
   userId?: string | null;
   display_name?: string | null;
   handle?: string | null;
-  bio?: string | null;
-  avatar_url?: string | null;
+  email?: string | null;
+  secondary_email?: string | null;
   verified?: boolean | null;
   createdAt?: number | string | null;
   updatedAt?: number | string | null;
+};
+
+type ProfileForm = {
+  phone_number: string;
+  secondary_email: string;
 };
 
 async function readJson(res: Response) {
@@ -44,14 +53,8 @@ function InstantProfileBridge({
   onForm,
 }: {
   userId: string | null | undefined;
-  onProfile: (profile: Profile | null) => void;
-  onForm: (form: {
-    display_name: string;
-    handle: string;
-    bio: string;
-    avatar_url: string;
-    phone_number: string;
-  }) => void;
+  onProfile: Dispatch<SetStateAction<Profile | null>>;
+  onForm: Dispatch<SetStateAction<ProfileForm>>;
 }) {
   if (!hasInstantConfig || !db || !userId) return null;
 
@@ -70,14 +73,8 @@ function InstantProfileBridgeInner({
   onForm,
 }: {
   userId: string;
-  onProfile: (profile: Profile | null) => void;
-  onForm: (form: {
-    display_name: string;
-    handle: string;
-    bio: string;
-    avatar_url: string;
-    phone_number: string;
-  }) => void;
+  onProfile: Dispatch<SetStateAction<Profile | null>>;
+  onForm: Dispatch<SetStateAction<ProfileForm>>;
 }) {
   const instantDb = db as NonNullable<typeof db>;
 
@@ -95,16 +92,18 @@ function InstantProfileBridgeInner({
     const rows = (profileQuery.data?.profiles ?? []) as InstantProfile[];
     const next = rows[0] ?? null;
     if (!next) {
-      onProfile(null);
       return;
     }
     const profile: Profile = {
       user_id: next.userId ?? userId,
       display_name: next.display_name ?? null,
       handle: next.handle ?? null,
-      bio: next.bio ?? null,
-      avatar_url: next.avatar_url ?? null,
+      email: next.email ?? null,
+      secondary_email: next.secondary_email ?? null,
       phone_number: (next as { phone_number?: string | null }).phone_number ?? null,
+      first_name: (next as { first_name?: string | null }).first_name ?? null,
+      middle_name: (next as { middle_name?: string | null }).middle_name ?? null,
+      last_name: (next as { last_name?: string | null }).last_name ?? null,
       verified: !!next.verified,
       created_at:
         typeof next.createdAt === "number"
@@ -119,14 +118,20 @@ function InstantProfileBridgeInner({
             ? next.updatedAt
             : null,
     };
-    onProfile(profile);
-    onForm({
-      display_name: profile.display_name ?? "",
-      handle: profile.handle ?? "",
-      bio: profile.bio ?? "",
-      avatar_url: profile.avatar_url ?? "",
-      phone_number: profile.phone_number ?? "",
+    onProfile((prev) => {
+      if (!prev) return profile;
+      return {
+        ...prev,
+        ...Object.fromEntries(
+          Object.entries(profile).filter(([, value]) => value !== null && value !== undefined),
+        ),
+      };
     });
+    onForm((prev) => ({
+      ...prev,
+      ...(profile.phone_number?.trim() ? { phone_number: profile.phone_number } : {}),
+      ...(profile.secondary_email?.trim() ? { secondary_email: profile.secondary_email } : {}),
+    }));
   }, [onForm, onProfile, profileQuery.data, userId]);
 
   return null;
@@ -136,13 +141,11 @@ export default function ProfileEditor() {
   const { getToken } = useAuth();
   const { user } = useUser();
   const [profile, setProfile] = useState<Profile | null>(null);
-  const [form, setForm] = useState({
-    display_name: "",
-    handle: "",
-    bio: "",
-    avatar_url: "",
+  const [form, setForm] = useState<ProfileForm>({
     phone_number: "",
+    secondary_email: "",
   });
+  const [editingPhone, setEditingPhone] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -161,12 +164,10 @@ export default function ProfileEditor() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setProfile(json);
       setForm({
-        display_name: json.display_name ?? "",
-        handle: json.handle ?? "",
-        bio: json.bio ?? "",
-        avatar_url: json.avatar_url ?? "",
         phone_number: json.phone_number ?? "",
+        secondary_email: json.secondary_email ?? "",
       });
+      setEditingPhone(!json.phone_number);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -186,11 +187,19 @@ export default function ProfileEditor() {
           Authorization: token ? `Bearer ${token}` : "",
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(form),
+        body: JSON.stringify({
+          phone_number: form.phone_number,
+          secondary_email: form.secondary_email,
+        }),
       });
       const json = (await readJson(res)) as Profile;
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setProfile(json);
+      setForm({
+        phone_number: json.phone_number ?? "",
+        secondary_email: json.secondary_email ?? "",
+      });
+      setEditingPhone(false);
       setSaved(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -200,9 +209,7 @@ export default function ProfileEditor() {
   };
 
   useEffect(() => {
-    if (!hasInstantConfig || !db) {
-      void load();
-    }
+    void load();
   }, [load]);
 
   return (
@@ -210,10 +217,7 @@ export default function ProfileEditor() {
       <div className="flex items-center justify-between gap-3">
         <div>
           <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
-            Profile
-          </div>
-          <div className="text-xs text-zinc-500 dark:text-zinc-400">
-            Read live from Instant. Writes still go through Flask.
+            Account details
           </div>
         </div>
         {hasInstantConfig && db ? null : (
@@ -247,70 +251,62 @@ export default function ProfileEditor() {
       ) : null}
 
       <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <label className="grid gap-1 text-sm text-zinc-700 dark:text-zinc-300">
-          Name
-          <input
-            value={form.display_name}
-            onChange={(e) =>
-              setForm((s) => ({ ...s, display_name: e.target.value }))
-            }
-            className="h-10 rounded-lg border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
-            placeholder="e.g. Folahanmi"
-          />
-        </label>
-
-        <label className="grid gap-1 text-sm text-zinc-700 dark:text-zinc-300">
-          User tag
-          <input
-            value={form.handle}
-            onChange={(e) => setForm((s) => ({ ...s, handle: e.target.value }))}
-            className="h-10 rounded-lg border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
-            placeholder="e.g. @fola"
-          />
-        </label>
+        <ReadOnlyField label="Legal name" value={formatLegalName(profile)} />
+        <ReadOnlyField label="User tag" value={profile?.handle ? `@${profile.handle}` : "—"} />
+        <ReadOnlyField label="Email" value={profile?.email ?? user?.primaryEmailAddress?.emailAddress ?? "—"} />
+        <ReadOnlyField label="Profile" value={profile?.verified ? "Verified" : "Onboarding complete"} />
       </div>
 
       <div className="mt-4 grid gap-4">
-        <label className="grid gap-1 text-sm text-zinc-700 dark:text-zinc-300">
-          Bio
-          <textarea
-            value={form.bio}
-            onChange={(e) => setForm((s) => ({ ...s, bio: e.target.value }))}
-            className="min-h-24 resize-y rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
-            placeholder="Short description…"
-          />
-        </label>
+        <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-4 dark:border-zinc-800 dark:bg-zinc-900/60">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-xs uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
+                Phone number
+              </div>
+              <div className="mt-2 text-sm font-medium text-zinc-900 dark:text-zinc-50">
+                {form.phone_number ? form.phone_number : "—"}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setEditingPhone((current) => !current)}
+              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-zinc-200 bg-white text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              aria-label={editingPhone ? "Close phone editor" : "Edit phone number"}
+            >
+              <PencilIcon className="h-4 w-4" />
+            </button>
+          </div>
+          {editingPhone ? (
+            <input
+              inputMode="tel"
+              value={form.phone_number}
+              onChange={(e) =>
+                setForm((s) => ({ ...s, phone_number: e.target.value }))
+              }
+              className="mt-3 h-10 w-full rounded-lg border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 disabled:cursor-not-allowed disabled:bg-zinc-50 disabled:text-zinc-500 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600 dark:disabled:bg-zinc-900 dark:disabled:text-zinc-500"
+              placeholder="e.g. 08012345678"
+            />
+          ) : null}
+        </div>
 
         <label className="grid gap-1 text-sm text-zinc-700 dark:text-zinc-300">
-          Avatar URL
+          Secondary email
           <input
-            value={form.avatar_url}
+            inputMode="email"
+            value={form.secondary_email}
             onChange={(e) =>
-              setForm((s) => ({ ...s, avatar_url: e.target.value }))
+              setForm((s) => ({ ...s, secondary_email: e.target.value }))
             }
-            className="h-10 rounded-lg border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
-            placeholder="https://…"
-          />
-        </label>
-
-        <label className="grid gap-1 text-sm text-zinc-700 dark:text-zinc-300">
-          Phone number
-          <input
-            inputMode="tel"
-            value={form.phone_number}
-            onChange={(e) =>
-              setForm((s) => ({ ...s, phone_number: e.target.value }))
-            }
-            className="h-10 rounded-lg border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
-            placeholder="e.g. 08012345678"
+            className="h-10 rounded-lg border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 disabled:cursor-not-allowed disabled:bg-zinc-50 disabled:text-zinc-500 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600 dark:disabled:bg-zinc-900 dark:disabled:text-zinc-500"
+            placeholder="e.g. name@domain.com"
           />
         </label>
       </div>
 
       <div className="mt-4 flex items-center justify-between gap-3">
         <div className="text-xs text-zinc-500 dark:text-zinc-400">
-          Your id: {profile?.user_id ?? "—"}
-          {profile?.verified ? " · Verified" : ""}
+          Identity fields are locked after signup. You can update phone and secondary email here.
         </div>
         <button
           type="button"
@@ -322,5 +318,26 @@ export default function ProfileEditor() {
         </button>
       </div>
     </section>
+  );
+}
+
+function formatLegalName(profile: Profile | null) {
+  if (!profile) return "—";
+  const parts = [profile.first_name, profile.middle_name, profile.last_name]
+    .map((part) => part?.trim())
+    .filter((part): part is string => Boolean(part));
+  return parts.length ? parts.join(" ") : profile.display_name ?? "—";
+}
+
+function ReadOnlyField({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 dark:border-zinc-800 dark:bg-zinc-900/60">
+      <div className="text-xs uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
+        {label}
+      </div>
+      <div className="mt-2 text-sm font-medium text-zinc-900 dark:text-zinc-50">
+        {value}
+      </div>
+    </div>
   );
 }

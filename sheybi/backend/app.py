@@ -24,8 +24,8 @@ from werkzeug.utils import secure_filename
 
 load_dotenv()
 
-os.environ.setdefault("DEV_AUTH", "1")
-os.environ.setdefault("ADMIN_USER_IDS", "dev_admin")
+os.environ.setdefault("DEV_AUTH", "0")
+os.environ.setdefault("ADMIN_USER_IDS", "")
 DEFAULT_RESERVE = float(os.getenv("PLATFORM_RESERVE_NGN", "10000000"))
 MAX_VERIFICATION_UPLOAD_BYTES = 5 * 1024 * 1024
 TERMS_VERSION = "2026-06-11-v1"
@@ -114,6 +114,16 @@ def create_app() -> Flask:
             except Exception:
                 return 0
 
+    def _row_time_ms(row: dict[str, Any] | None, *fields: str) -> int:
+        if not row:
+            return 0
+        for field in fields:
+            if field in row and row.get(field) is not None:
+                value = _to_ms(row.get(field))
+                if value:
+                    return value
+        return 0
+
     paystack_bank_cache_path = Path(__file__).resolve().parent / ".cache" / "paystack_banks.json"
     paystack_bank_cache_lock = Lock()
     paystack_bank_cache_ttl_ms = 24 * 60 * 60 * 1000
@@ -176,7 +186,7 @@ def create_app() -> Flask:
     def _query_markets() -> list[dict[str, Any]]:
         data = admin_query({"markets": {}})
         markets = _as_list(data.get("markets"))
-        markets.sort(key=lambda item: item.get("createdAt", 0), reverse=True)
+        markets.sort(key=lambda item: _row_time_ms(item, "createdAt", "created_at", "updatedAt", "updated_at"), reverse=True)
         return markets
 
     def _market_is_open(row: dict[str, Any]) -> bool:
@@ -192,26 +202,26 @@ def create_app() -> Flask:
     def _query_events(market_id: str) -> list[dict[str, Any]]:
         data = admin_query({"market_events": {"$": {"where": {"marketId": market_id}}}})
         events = _as_list(data.get("market_events"))
-        events.sort(key=lambda item: item.get("createdAt", 0))
+        events.sort(key=lambda item: _row_time_ms(item, "createdAt", "created_at", "updatedAt", "updated_at"))
         return events
 
     def _query_user_events(user_id: str) -> list[dict[str, Any]]:
         data = admin_query({"market_events": {"$": {"where": {"userId": user_id}}}})
         events = _as_list(data.get("market_events"))
-        events.sort(key=lambda item: item.get("createdAt", 0))
+        events.sort(key=lambda item: _row_time_ms(item, "createdAt", "created_at", "updatedAt", "updated_at"))
         return events
 
     def _query_all_events() -> list[dict[str, Any]]:
         data = admin_query({"market_events": {}})
         events = _as_list(data.get("market_events"))
-        events.sort(key=lambda item: item.get("createdAt", 0), reverse=True)
+        events.sort(key=lambda item: _row_time_ms(item, "createdAt", "created_at", "updatedAt", "updated_at"), reverse=True)
         return events
 
     def _query_platform_ledger() -> list[dict[str, Any]]:
         try:
             data = admin_query({"platform_ledger": {}})
             rows = _as_list(data.get("platform_ledger"))
-            rows.sort(key=lambda item: item.get("createdAt", 0), reverse=True)
+            rows.sort(key=lambda item: _row_time_ms(item, "createdAt", "created_at", "updatedAt", "updated_at"), reverse=True)
             return rows
         except Exception:
             return []
@@ -219,7 +229,7 @@ def create_app() -> Flask:
     def _query_all_profiles() -> list[dict[str, Any]]:
         data = admin_query({"profiles": {}})
         profiles = _as_list(data.get("profiles"))
-        profiles.sort(key=lambda item: item.get("updatedAt", item.get("createdAt", 0)), reverse=True)
+        profiles.sort(key=lambda item: _row_time_ms(item, "updatedAt", "updated_at", "createdAt", "created_at"), reverse=True)
         return profiles
 
     def _query_profile(user_id: str) -> dict[str, Any] | None:
@@ -247,20 +257,14 @@ def create_app() -> Flask:
         legal_name = row.get("display_name")
         bank_validated = str(verification.get("bank_validation_status") or "").lower() == "verified"
         id_document_type = str(verification.get("id_document_type") or "").lower()
-        verification_asset_ready = False
-        if id_document_type == "bvn":
-            verification_asset_ready = bool(row.get("bvn_number")) and bank_validated
-        else:
-            verification_asset_ready = bool(verification["id_document_image_path"])
+        verification_asset_ready = bool(verification["verification_tier1_complete"]) or bool(verification["verification_tier2_complete"])
         wallet_balance = float(row.get("walletBalance") or 100000.0)
         cooldown_state = _deposit_cooldown_state(str(row.get("userId") or user_id))
         cooling_balance = float(cooldown_state["cooling_balance"])
         withdrawable_balance = round(max(0.0, wallet_balance - cooling_balance), 2)
         kyc_ready = bool(
             legal_name
-            and row.get("phone_number")
             and verification["verification_status"] == "approved"
-            and verification["selfie_image_path"]
             and verification_asset_ready
         )
         return {
@@ -270,6 +274,7 @@ def create_app() -> Flask:
             "bio": row.get("bio"),
             "avatar_url": row.get("avatar_url"),
             "email": row.get("email"),
+            "secondary_email": row.get("secondary_email") or row.get("secondaryEmail"),
             "first_name": row.get("first_name"),
             "last_name": row.get("last_name"),
             "phone_number": row.get("phone_number"),
@@ -277,12 +282,10 @@ def create_app() -> Flask:
             "verified": verification["verification_status"] == "approved" or bool(row.get("verified")),
             "verification_status": verification["verification_status"],
             "verification_ready": kyc_ready,
+            "verification_tier1_complete": verification["verification_tier1_complete"],
+            "verification_tier2_complete": verification["verification_tier2_complete"],
             "id_document_type": verification["id_document_type"],
-            "id_document_image_path": verification["id_document_image_path"],
             "age_proof_type": verification["age_proof_type"],
-            "age_proof_image_path": verification["age_proof_image_path"],
-            "selfie_image_path": verification["selfie_image_path"],
-            "birth_certificate_image_path": verification["age_proof_image_path"],
             "bank_validation_status": verification["bank_validation_status"],
             "bank_name": verification["bank_name"],
             "bank_code": verification["bank_code"],
@@ -326,6 +329,26 @@ def create_app() -> Flask:
             for part in str(value).replace(",", " ").split()
         }
         return {token for token in tokens if token}
+
+    def _split_legal_name(value: str | None) -> tuple[str | None, str | None]:
+        clean_value = _clean_text(value, 200)
+        if not clean_value:
+            return None, None
+        parts = clean_value.split()
+        if len(parts) == 1:
+            return parts[0], None
+        return parts[0], " ".join(parts[1:])
+
+    def _split_full_name(value: str | None) -> tuple[str | None, str | None, str | None]:
+        clean_value = _clean_text(value, 200)
+        if not clean_value:
+            return None, None, None
+        parts = clean_value.split()
+        if len(parts) == 1:
+            return parts[0], None, None
+        if len(parts) == 2:
+            return parts[0], None, parts[1]
+        return parts[0], " ".join(parts[1:-1]), parts[-1]
 
     def _name_match_count(a: str | None, b: str | None) -> int:
         return len(_profile_name_tokens(a) & _profile_name_tokens(b))
@@ -467,12 +490,20 @@ def create_app() -> Flask:
         }
         return _paystack_request(f"/customer/{quote(customer_code)}/identification", method="POST", payload=payload)
 
-    def _paystack_create_customer(*, email: str, first_name: str | None = None, last_name: str | None = None) -> dict[str, Any]:
+    def _paystack_create_customer(
+        *,
+        email: str,
+        first_name: str | None = None,
+        last_name: str | None = None,
+        phone_number: str | None = None,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {"email": email}
         if first_name:
             payload["first_name"] = first_name
         if last_name:
             payload["last_name"] = last_name
+        if phone_number:
+            payload["phone"] = phone_number
         return _paystack_request("/customer", method="POST", payload=payload)
 
     def _paystack_create_transfer_recipient(*, name: str, account_number: str, bank_code: str, currency: str = "NGN") -> dict[str, Any]:
@@ -555,6 +586,7 @@ def create_app() -> Flask:
                 email=email,
                 first_name=str(profile.get("first_name") or "").strip() or None,
                 last_name=str(profile.get("last_name") or "").strip() or None,
+                phone_number=str(profile.get("phone_number") or profile.get("phoneNumber") or "").strip() or None,
             )
             data = resp.get("data") if isinstance(resp, dict) else {}
             customer_code = str((data or {}).get("customer_code") or "").strip()
@@ -618,9 +650,6 @@ def create_app() -> Flask:
         if verified_bank_holder and account_name and _name_match_count(verified_bank_holder, account_name) < 2:
             score += 35
             flags.append("bank_account_name_mismatch")
-        if not profile.get("phone_number") and not profile.get("phoneNumber"):
-            score += 10
-            flags.append("missing_phone_number")
         if not str(profile.get("paystack_customer_code") or profile.get("paystackCustomerCode") or "").strip():
             score += 10
             flags.append("missing_paystack_customer")
@@ -672,7 +701,7 @@ def create_app() -> Flask:
     def _deposit_requests_for_user(user_id: str) -> list[dict[str, Any]]:
         data = admin_query({"deposit_requests": {"$": {"where": {"userId": user_id}}}})
         rows = _as_list(data.get("deposit_requests"))
-        rows.sort(key=lambda item: item.get("createdAt", 0), reverse=True)
+        rows.sort(key=lambda item: _row_time_ms(item, "createdAt", "created_at", "updatedAt", "updated_at"), reverse=True)
         return rows
 
     def _deposit_cooldown_state(user_id: str) -> dict[str, Any]:
@@ -710,7 +739,7 @@ def create_app() -> Flask:
     def _withdrawal_requests_for_user(user_id: str) -> list[dict[str, Any]]:
         data = admin_query({"withdrawal_requests": {"$": {"where": {"userId": user_id}}}})
         rows = _as_list(data.get("withdrawal_requests"))
-        rows.sort(key=lambda item: item.get("createdAt", 0), reverse=True)
+        rows.sort(key=lambda item: _row_time_ms(item, "createdAt", "created_at", "updatedAt", "updated_at"), reverse=True)
         return rows
 
     def _serialize_deposit_request(row: dict[str, Any]) -> dict[str, Any]:
@@ -847,10 +876,35 @@ def create_app() -> Flask:
             or ("approved" if row.get("verified") else "unsubmitted")
         ).lower()
         id_document_type = row.get("id_document_type") or row.get("idDocumentType")
+        tier2_documents = row.get("verification_tier2_documents") or row.get("verificationTier2Documents")
+        if not isinstance(tier2_documents, list):
+            tier2_documents = []
+        cleaned_tier2_documents: list[dict[str, Any]] = []
+        for item in tier2_documents:
+            if not isinstance(item, dict):
+                continue
+            cleaned_tier2_documents.append(
+                {
+                    "document_type": item.get("document_type") or item.get("documentType"),
+                    "document_image_path": item.get("document_image_path") or item.get("documentImagePath"),
+                }
+            )
+        tier1_complete = bool(row.get("id_document_image_path") or row.get("idDocumentImagePath")) and bool(
+            row.get("selfie_image_path") or row.get("selfieImagePath")
+        )
+        tier2_complete = len(cleaned_tier2_documents) >= 1 or bool(
+            row.get("age_proof_image_path")
+            or row.get("ageProofImagePath")
+            or row.get("birth_certificate_image_path")
+            or row.get("birthCertificateImagePath")
+        )
         return {
             "verified": verification_status == "approved" or bool(row.get("verified")),
             "verification_status": verification_status,
             "verification_notes": row.get("verification_notes") or row.get("verificationNotes"),
+            "verification_tier1_complete": tier1_complete,
+            "verification_tier2_complete": tier2_complete,
+            "verification_tier2_documents": cleaned_tier2_documents,
             "id_document_type": id_document_type,
             "id_document_image_path": row.get("id_document_image_path") or row.get("idDocumentImagePath"),
             "age_proof_type": row.get("age_proof_type") or row.get("ageProofType"),
@@ -868,6 +922,9 @@ def create_app() -> Flask:
             "verified_bank_account": row.get("verified_bank_account") or row.get("verifiedBankAccount"),
             "verification_reference": row.get("verification_reference") or row.get("verificationReference"),
             "phone_number": row.get("phone_number") or row.get("phoneNumber"),
+            "first_name": row.get("first_name") or row.get("firstName"),
+            "middle_name": row.get("middle_name") or row.get("middleName"),
+            "last_name": row.get("last_name") or row.get("lastName"),
             "bvn_number": row.get("bvn_number") or row.get("bvnNumber"),
             "verification_submitted_at": row.get("verification_submitted_at") or row.get("verificationSubmittedAt"),
             "verification_reviewed_at": row.get("verification_reviewed_at") or row.get("verificationReviewedAt"),
@@ -1661,7 +1718,9 @@ def create_app() -> Flask:
         bio: str | None = None,
         avatar_url: str | None = None,
         email: str | None = None,
+        secondary_email: str | None = None,
         first_name: str | None = None,
+        middle_name: str | None = None,
         last_name: str | None = None,
         phone_number: str | None = None,
         paystack_customer_code: str | None = None,
@@ -1677,15 +1736,29 @@ def create_app() -> Flask:
 
         existing = _query_profile(user_id)
         existing = existing or {}
+        existing_verified = bool(existing.get("verified")) or str(existing.get("verification_status") or existing.get("verificationStatus") or "").lower() == "approved"
+        next_display_name = clean(display_name, 200) if display_name is not None else existing.get("display_name")
+        next_first_name = clean(first_name, 120) if first_name is not None else None
+        next_middle_name = clean(middle_name, 120) if middle_name is not None else None
+        next_last_name = clean(last_name, 120) if last_name is not None else None
+        if next_display_name and (next_first_name is None and next_last_name is None and next_middle_name is None) and not existing_verified:
+            derived_first_name, derived_middle_name, derived_last_name = _split_full_name(next_display_name)
+            next_first_name = derived_first_name
+            next_middle_name = derived_middle_name
+            next_last_name = derived_last_name
+        if next_display_name is None and not existing_verified and any(value is not None for value in (next_first_name, next_middle_name, next_last_name)):
+            next_display_name = " ".join(part for part in [next_first_name, next_middle_name, next_last_name] if part)
         profile = {
             "userId": user_id,
-            "display_name": clean(display_name, 200) if display_name is not None else existing.get("display_name"),
+            "display_name": existing.get("display_name") if existing_verified else next_display_name,
             "handle": clean(handle, 50) if handle is not None else existing.get("handle"),
             "bio": clean(bio, 2000) if bio is not None else existing.get("bio"),
             "avatar_url": clean(avatar_url, 500) if avatar_url is not None else existing.get("avatar_url"),
             "email": clean(email, 255) if email is not None else existing.get("email"),
-            "first_name": clean(first_name, 120) if first_name is not None else existing.get("first_name"),
-            "last_name": clean(last_name, 120) if last_name is not None else existing.get("last_name"),
+            "secondary_email": clean(secondary_email, 255) if secondary_email is not None else existing.get("secondary_email") or existing.get("secondaryEmail"),
+            "first_name": existing.get("first_name") if existing_verified else (next_first_name if next_first_name is not None else existing.get("first_name")),
+            "middle_name": existing.get("middle_name") if existing_verified else (next_middle_name if next_middle_name is not None else existing.get("middle_name")),
+            "last_name": existing.get("last_name") if existing_verified else (next_last_name if next_last_name is not None else existing.get("last_name")),
             "phone_number": clean(phone_number, 30) if phone_number is not None else existing.get("phone_number") or existing.get("phoneNumber"),
             **_verification_fields(existing),
             "terms_accepted_at": existing.get("terms_accepted_at") or existing.get("termsAcceptedAt"),
@@ -1862,8 +1935,9 @@ def create_app() -> Flask:
             return jsonify({"error": "market_load_failed", "detail": str(exc)}), 500
 
         payload = _market_payload(row)
+        user_id = getattr(g, "clerk_user_id", None)
         try:
-            payload["user_position"] = _user_market_profit_summary(g.clerk_user_id, row)
+            payload["user_position"] = _user_market_profit_summary(user_id, row) if user_id else None
         except Exception:
             payload["user_position"] = None
         return jsonify(payload)
@@ -1921,15 +1995,48 @@ def create_app() -> Flask:
         user_id = g.clerk_user_id
         data = request.get_json(silent=True) or {}
         try:
+            existing = _query_profile(user_id) or {}
+            existing_has_profile = bool(existing)
+            existing_verified = bool(existing.get("verified")) or str(existing.get("verification_status") or existing.get("verificationStatus") or "").lower() == "approved"
+            def _blank(value: Any) -> bool:
+                return value is None or (isinstance(value, str) and not value.strip())
+
+            def _merge_locked(value_key: str, submitted: Any, max_len: int | None = None) -> Any:
+                existing_value = existing.get(value_key)
+                if existing_verified:
+                    return existing_value
+                if not _blank(existing_value):
+                    return existing_value
+                if submitted is None:
+                    return existing_value
+                if isinstance(submitted, str):
+                    cleaned = submitted.strip()
+                    if not cleaned:
+                        return existing_value
+                    return cleaned[:max_len] if max_len is not None else cleaned
+                return submitted
+
+            display_name = data.get("display_name")
+            first_name = data.get("first_name")
+            middle_name = data.get("middle_name") or data.get("middleName")
+            last_name = data.get("last_name")
+            if not display_name and any(value is not None for value in (first_name, middle_name, last_name)):
+                display_name = " ".join(
+                    part.strip()
+                    for part in [first_name, middle_name, last_name]
+                    if isinstance(part, str) and part.strip()
+                )
             profile = _store_profile(
                 user_id,
-                display_name=data.get("display_name"),
-                handle=data.get("handle"),
-                bio=data.get("bio"),
-                avatar_url=data.get("avatar_url"),
-                email=data.get("email"),
-                first_name=data.get("first_name"),
-                last_name=data.get("last_name"),
+                display_name=_merge_locked("display_name", display_name, 200),
+                handle=_merge_locked("handle", data.get("handle"), 50),
+                bio=_merge_locked("bio", data.get("bio"), 2000),
+                avatar_url=_merge_locked("avatar_url", data.get("avatar_url"), 500),
+                email=_merge_locked("email", data.get("email"), 255),
+                secondary_email=data.get("secondary_email") or data.get("secondaryEmail"),
+                first_name=_merge_locked("first_name", first_name, 120),
+                middle_name=_merge_locked("middle_name", middle_name, 120),
+                last_name=_merge_locked("last_name", last_name, 120),
                 phone_number=data.get("phone_number") or data.get("phoneNumber"),
                 paystack_customer_code=data.get("paystack_customer_code") or data.get("paystackCustomerCode"),
                 terms_accepted=bool(data.get("terms_accepted") or data.get("termsAccepted")),
@@ -1952,6 +2059,9 @@ def create_app() -> Flask:
                 **serialized,
                 "verification_status": serialized.get("verification_status"),
                 "verification_ready": serialized.get("verification_ready"),
+                "verification_tier1_complete": serialized.get("verification_tier1_complete"),
+                "verification_tier2_complete": serialized.get("verification_tier2_complete"),
+                "verification_tier2_documents": serialized.get("verification_tier2_documents"),
                 "document_url": _verification_file_url(serialized.get("id_document_image_path")),
                 "age_proof_url": _verification_file_url(serialized.get("age_proof_image_path")),
                 "selfie_url": _verification_file_url(serialized.get("selfie_image_path")),
@@ -1970,79 +2080,47 @@ def create_app() -> Flask:
 
             form = request.form or {}
             doc_type = str(form.get("document_type") or form.get("documentType") or "").strip().lower()
-            if doc_type not in {"bvn", "nin_slip", "voters_card", "passport"}:
+            if doc_type not in {"nin_slip", "passport", "voters_card"}:
                 return jsonify({"error": "invalid_document_type"}), 400
+            verification_tier = str(form.get("verification_tier") or form.get("tier") or "tier1").strip().lower()
+            if verification_tier not in {"tier1", "tier2"}:
+                return jsonify({"error": "invalid_verification_tier"}), 400
 
             selfie_file = request.files.get("selfie_image")
-            phone_number = _clean_text(str(form.get("phone_number") or form.get("phoneNumber") or ""), 30)
-            bvn = _clean_text(str(form.get("bvn") or form.get("bvnNumber") or form.get("bvn_number") or ""), 20)
-            bank_name = _clean_text(str(form.get("bank_name") or form.get("bankName") or ""), 120)
-            bank_code = _clean_text(str(form.get("bank_code") or form.get("bankCode") or ""), 20)
-            bank_account_number = _clean_text(str(form.get("bank_account_number") or form.get("bankAccountNumber") or ""), 20)
-            bank_account_name = _clean_text(str(form.get("bank_account_name") or form.get("bankAccountName") or ""), 120)
-            id_file = None
-            bank_validation_status = None
-            bank_validation_checked_at = None
-            bank_auto_approved = False
-            verified_bank_account = None
-            if not selfie_file:
-                return jsonify({"error": "missing_files", "required": ["selfie_image"]}), 400
-            if not phone_number:
-                return jsonify({"error": "missing_fields", "required": ["phone_number"]}), 400
-            if doc_type == "bvn":
-                if not bvn or not re.fullmatch(r"\d{11}", bvn):
-                    return jsonify({"error": "invalid_bvn"}), 400
-                if not bank_name or not bank_account_number or not bank_account_name:
-                    return jsonify(
-                        {
-                            "error": "missing_fields",
-                            "required": ["bank_name", "bank_account_number", "bank_account_name"],
-                        }
-                    ), 400
-                resolved_bank_code = bank_code or _resolve_bank_code(bank_name)
-                if not resolved_bank_code:
-                    return jsonify({"error": "bank_not_supported", "detail": bank_name}), 400
-                verified_bank_account = f"{bank_name} / {bank_account_name} / {bank_account_number}"
-                customer_code = _ensure_paystack_customer(profile)
-                if not customer_code:
-                    return jsonify({"error": "missing_paystack_customer"}), 400
-                try:
-                    validation_resp = _paystack_validate_customer(
-                        customer_code=customer_code,
-                        bank_code=resolved_bank_code,
-                        account_number=bank_account_number,
-                        bvn=bvn,
-                        first_name=str(profile.get("first_name") or "").strip() or (display_name.split(" ")[0] if display_name else ""),
-                        last_name=str(profile.get("last_name") or "").strip() or " ".join(display_name.split(" ")[1:]),
-                    )
-                    data_node = validation_resp.get("data") if isinstance(validation_resp, dict) else {}
-                    validation_status = str(
-                        (data_node or {}).get("status")
-                        or validation_resp.get("status")
-                        or validation_resp.get("message")
-                        or ""
-                    ).lower()
-                    if validation_status in {"true", "success", "successful", "approved"}:
-                        bank_validation_status = "verified"
-                        bank_validation_checked_at = now_ms()
-                        verified_bank_account = f"{bank_name} / {bank_account_name} / {bank_account_number}"
-                        bank_auto_approved = True
-                    else:
-                        bank_validation_status = "pending_review"
-                except Exception:
-                    bank_validation_status = "pending_review"
-            elif doc_type in {"nin_slip", "voters_card", "passport"}:
+            existing_verification = _verification_fields(profile)
+            stored_selfie = None
+            stored_doc = None
+            tier2_documents: list[dict[str, Any]] = []
+            if verification_tier == "tier1":
                 id_file = request.files.get("document_image") or request.files.get("id_image")
                 if not id_file:
                     return jsonify({"error": "missing_files", "required": ["document_image"]}), 400
+                if not selfie_file:
+                    return jsonify({"error": "missing_files", "required": ["selfie_image"]}), 400
+                stored_doc = _save_verification_file(user_id, "id", id_file)
+                stored_selfie = _save_verification_file(user_id, "selfie", selfie_file)
             else:
-                return jsonify({"error": "invalid_document_type"}), 400
+                if not (existing_verification.get("verified") or str(existing_verification.get("verification_status") or "").lower() == "approved"):
+                    return jsonify({"error": "tier1_not_verified"}), 400
+                tier2_type = str(form.get("document_type") or form.get("documentType") or "").strip().lower()
+                tier2_file = request.files.get("document_image") or request.files.get("documentImage")
+                if tier2_type not in {"nin_slip", "passport", "voters_card"}:
+                    return jsonify({"error": "invalid_document_type"}), 400
+                if not tier2_file:
+                    return jsonify({"error": "missing_files", "required": ["document_image"]}), 400
+                tier1_type = str(existing_verification.get("id_document_type") or "").strip().lower()
+                if tier2_type == tier1_type:
+                    return jsonify({"error": "duplicate_document_type"}), 400
+                tier2_documents.append(
+                    {
+                        "document_type": tier2_type,
+                        "document_image_path": _save_verification_file(user_id, f"tier2_{tier2_type}", tier2_file),
+                    }
+                )
 
-            stored_doc = _save_verification_file(user_id, "id", id_file) if id_file else None
-            stored_selfie = _save_verification_file(user_id, "selfie", selfie_file)
             now_created = now_ms()
             request_ctx = _request_context()
-            approved = bank_auto_approved and doc_type == "bvn"
+            approved = False
             payload = {
                 "userId": user_id,
                 "display_name": profile.get("display_name"),
@@ -2052,29 +2130,23 @@ def create_app() -> Flask:
                 "email": profile.get("email"),
                 "first_name": profile.get("first_name"),
                 "last_name": profile.get("last_name"),
-                "phone_number": phone_number,
-                "bvn_number": bvn if doc_type == "bvn" else profile.get("bvn_number") or profile.get("bvnNumber"),
                 **request_ctx,
                 "verified": approved,
-                "verification_status": "approved" if approved else "pending_review",
+                "verification_status": "pending_review",
                 "verification_notes": None,
-                "id_document_type": doc_type,
-                "id_document_image_path": stored_doc,
-                "age_proof_type": None,
-                "age_proof_image_path": None,
-                "selfie_image_path": stored_selfie,
-                "bank_validation_status": bank_validation_status if doc_type == "bvn" else None,
-                "bank_name": bank_name if doc_type == "bvn" else None,
-                "bank_code": (bank_code or _resolve_bank_code(bank_name)) if doc_type == "bvn" else None,
-                "bank_account_number": bank_account_number if doc_type == "bvn" else None,
-                "bank_account_name": bank_account_name if doc_type == "bvn" else None,
-                "bank_validation_checked_at": bank_validation_checked_at if doc_type == "bvn" else None,
+                "id_document_type": doc_type if verification_tier == "tier1" else existing_verification.get("id_document_type"),
+                "id_document_image_path": stored_doc if verification_tier == "tier1" else existing_verification.get("id_document_image_path"),
+                "age_proof_type": existing_verification.get("age_proof_type"),
+                "age_proof_image_path": existing_verification.get("age_proof_image_path"),
+                "selfie_image_path": stored_selfie if verification_tier == "tier1" else existing_verification.get("selfie_image_path"),
                 "verification_reference": f"kyc_{uuid.uuid4().hex[:16]}",
                 "verified_name": profile.get("display_name"),
-                "verified_bank_account": verified_bank_account if doc_type == "bvn" else None,
                 "birth_certificate_image_path": None,
+                "verification_tier1_complete": verification_tier == "tier1" or bool(existing_verification.get("verification_tier1_complete")),
+                "verification_tier2_complete": verification_tier == "tier2" or bool(existing_verification.get("verification_tier2_complete")),
+                "verification_tier2_documents": tier2_documents if verification_tier == "tier2" else existing_verification.get("verification_tier2_documents") or [],
                 "verification_submitted_at": now_created,
-                "verification_reviewed_at": now_created if approved else None,
+                "verification_reviewed_at": None,
                 "walletBalance": float(profile.get("walletBalance") or 100000.0),
                 "currency": profile.get("currency") or "NGN",
                 "createdAt": profile.get("createdAt") or now_created,
@@ -2085,7 +2157,9 @@ def create_app() -> Flask:
             stored = _query_profile(user_id)
             if not stored:
                 return jsonify({"error": "verification_save_failed"}), 500
-            return jsonify(_serialize_profile(stored, user_id))
+            response = _serialize_profile(stored, user_id)
+            response["verification_status"] = "submitted"
+            return jsonify(response)
         except Exception as exc:
             return jsonify({"error": "verification_save_failed", "detail": str(exc)}), 500
 
@@ -2245,7 +2319,7 @@ def create_app() -> Flask:
                 "amount": amount_kobo,
                 "currency": "NGN",
                 "status": "success",
-                "gateway_response": data.get("gateway_response") or data.get("gatewayResponse") or "browser_callback_confirmed",
+                "gateway_response": data.get("gateway_response") or data.get("gatewayResponse") or "confirmed",
                 "paid_at": data.get("paid_at") or data.get("paidAt") or now_utc().isoformat(),
             }
             finalized = _finalize_deposit_request(reference, transaction)
@@ -2314,7 +2388,6 @@ def create_app() -> Flask:
             bank_code = _clean_text(str(data.get("bank_code") or data.get("bankCode") or ""), 20)
             account_name = _clean_text(str(data.get("account_name") or data.get("accountName") or ""), 200)
             account_number = _clean_text(str(data.get("account_number") or data.get("accountNumber") or ""), 20)
-            request_phone_number = _clean_text(str(data.get("phone_number") or data.get("phoneNumber") or ""), 30)
             if amount <= 0:
                 return jsonify({"error": "amount_must_be_positive"}), 400
             if not bank_name or not account_name or not account_number:
@@ -2332,10 +2405,6 @@ def create_app() -> Flask:
                 ).lower()
                 if verification_status != "approved" or not profile.get("verified"):
                     return jsonify({"error": "verification_required"}), 400
-                profile_phone_number = str(profile.get("phone_number") or profile.get("phoneNumber") or "").strip()
-                effective_phone_number = profile_phone_number or request_phone_number
-                if not effective_phone_number:
-                    return jsonify({"error": "phone_number_required"}), 400
                 display_name = str(profile.get("display_name") or "").strip()
                 if _name_match_count(display_name, account_name) < 2:
                     return jsonify({"error": "account_name_mismatch"}), 400
@@ -2401,7 +2470,6 @@ def create_app() -> Flask:
                     "email": profile.get("email"),
                     "first_name": profile.get("first_name"),
                     "last_name": profile.get("last_name"),
-                    "phone_number": effective_phone_number,
                     **_verification_fields(profile),
                     "walletBalance": next_wallet_balance,
                     "currency": profile.get("currency") or "NGN",
@@ -2429,7 +2497,6 @@ def create_app() -> Flask:
                                 "bankCode": bank_code or None,
                                 "accountName": account_name,
                                 "accountNumber": account_number,
-                                "phoneNumber": effective_phone_number,
                                 "verifiedName": display_name,
                                 "verifiedBankAccount": verified_bank_holder or None,
                                 "bankValidationStatus": profile.get("bank_validation_status") or profile.get("bankValidationStatus"),
@@ -2458,7 +2525,6 @@ def create_app() -> Flask:
                         "bank_code": bank_code or None,
                         "account_name": account_name,
                         "account_number": account_number,
-                        "phone_number": effective_phone_number,
                         "created_at": created_at,
                     },
                         "wallet_balance": _wallet_balance(user_id),
@@ -3378,60 +3444,85 @@ def create_app() -> Flask:
             return jsonify({"error": "forbidden"}), 403
         try:
             profiles = _query_all_profiles()
-            events = _query_all_events()
-            markets = {str(r.get("id")): r for r in _query_markets()}
-            withdrawals = _as_list(admin_query({"withdrawal_requests": {}}).get("withdrawal_requests"))
-            deposits = _as_list(admin_query({"deposit_requests": {}}).get("deposit_requests"))
         except Exception as exc:
-            return jsonify({"error": "admin_audit_failed", "detail": str(exc)}), 500
-
+            return jsonify({"error": "admin_users_failed", "detail": str(exc)}), 500
         users: list[dict[str, Any]] = []
         profiles_by_user_id = {str(p.get("userId")): p for p in profiles if p.get("userId")}
-        events_by_user_id: dict[str, list[dict[str, Any]]] = {}
-        for event in events:
-            user_id = event.get("userId")
-            if not user_id:
-                continue
-            events_by_user_id.setdefault(str(user_id), []).append(event)
-
-        withdrawals_by_user_id: dict[str, list[dict[str, Any]]] = {}
-        for row in withdrawals:
-            user_id = row.get("userId")
-            if not user_id:
-                continue
-            withdrawals_by_user_id.setdefault(str(user_id), []).append(row)
-
-        deposits_by_user_id: dict[str, list[dict[str, Any]]] = {}
-        for row in deposits:
-            user_id = row.get("userId")
-            if not user_id:
-                continue
-            deposits_by_user_id.setdefault(str(user_id), []).append(row)
 
         for user_id, profile in profiles_by_user_id.items():
-            user_events = events_by_user_id.get(user_id, [])
+            try:
+                serial = _serialize_profile(profile, user_id)
+                users.append(
+                    {
+                        "user_id": user_id,
+                        "display_name": serial.get("display_name"),
+                        "handle": serial.get("handle"),
+                        "verified": serial.get("verified"),
+                        "verification_status": serial.get("verification_status"),
+                        "verification_ready": serial.get("verification_ready"),
+                        "wallet_balance": serial.get("wallet_balance"),
+                        "currency": serial.get("currency"),
+                        "updated_at": serial.get("updated_at"),
+                        "created_at": serial.get("created_at"),
+                    }
+                )
+            except Exception:
+                continue
+
+        users.sort(
+            key=lambda item: _row_time_ms(item, "updated_at", "created_at", "updatedAt", "createdAt"),
+            reverse=True,
+        )
+        return jsonify({"users": users, "total_users": len(users), "total_transactions": 0})
+
+    @app.get("/api/admin/users/<user_id>")
+    @require_auth
+    def admin_user_detail(user_id: str):
+        if not is_admin_user(g.clerk_user_id):
+            return jsonify({"error": "forbidden"}), 403
+        try:
+            profile = _query_profile(user_id)
+            if not profile:
+                return jsonify({"error": "not_found"}), 404
             serial = _serialize_profile(profile, user_id)
-            user_withdrawals = withdrawals_by_user_id.get(user_id, [])
-            user_deposits = deposits_by_user_id.get(user_id, [])
-            users.append(
+            user_events = _query_user_events(user_id)
+            user_withdrawals = _withdrawal_requests_for_user(user_id)
+            user_deposits = _deposit_requests_for_user(user_id)
+            market_titles = {str(row.get("id")): row.get("title") for row in _query_markets()}
+            return jsonify(
                 {
                     "user_id": user_id,
                     "display_name": serial.get("display_name"),
                     "handle": serial.get("handle"),
                     "bio": serial.get("bio"),
                     "avatar_url": serial.get("avatar_url"),
+                    "email": serial.get("email"),
+                    "first_name": serial.get("first_name"),
+                    "middle_name": serial.get("middle_name"),
+                    "last_name": serial.get("last_name"),
+                    "phone_number": serial.get("phone_number"),
                     "verified": serial.get("verified"),
                     "verification_status": serial.get("verification_status"),
                     "verification_ready": serial.get("verification_ready"),
+                    "verification_tier1_complete": serial.get("verification_tier1_complete"),
+                    "verification_tier2_complete": serial.get("verification_tier2_complete"),
                     "id_document_type": serial.get("id_document_type"),
-                    "id_document_image_path": serial.get("id_document_image_path"),
                     "id_document_url": _verification_file_url(serial.get("id_document_image_path")),
                     "bvn_number": serial.get("bvn_number"),
                     "age_proof_type": serial.get("age_proof_type"),
-                    "age_proof_image_path": serial.get("age_proof_image_path"),
                     "age_proof_url": _verification_file_url(serial.get("age_proof_image_path")),
-                    "selfie_image_path": serial.get("selfie_image_path"),
                     "selfie_url": _verification_file_url(serial.get("selfie_image_path")),
+                    "bank_validation_status": serial.get("bank_validation_status"),
+                    "bank_name": serial.get("bank_name"),
+                    "bank_code": serial.get("bank_code"),
+                    "bank_account_number": serial.get("bank_account_number"),
+                    "bank_account_name": serial.get("bank_account_name"),
+                    "bank_validation_checked_at": serial.get("bank_validation_checked_at"),
+                    "verified_name": serial.get("verified_name"),
+                    "verified_bank_account": serial.get("verified_bank_account"),
+                    "verification_reference": serial.get("verification_reference"),
+                    "paystack_customer_code": serial.get("paystack_customer_code"),
+                    "withdrawal_cooldown_until": serial.get("withdrawal_cooldown_until"),
                     "verification_notes": serial.get("verification_notes"),
                     "verification_submitted_at": serial.get("verification_submitted_at"),
                     "verification_reviewed_at": serial.get("verification_reviewed_at"),
@@ -3474,17 +3565,17 @@ def create_app() -> Flask:
                         {
                             "id": event.get("id"),
                             "market_id": event.get("marketId"),
-                            "market_title": markets.get(str(event.get("marketId")), {}).get("title"),
+                            "market_title": market_titles.get(str(event.get("marketId"))),
                             "option_id": event.get("optionId"),
                             "option_label": event.get("optionLabel"),
                             "type": event.get("type"),
                             "side": event.get("side"),
-                            "amount": event.get("amount"),
-                            "shares": event.get("shares"),
-                            "quantity": event.get("quantity"),
-                            "price": event.get("price"),
+                            "amount": _parse_float(event.get("amount") or event.get("grossAmount")),
+                            "shares": _parse_float(event.get("shares") or event.get("quantity")),
+                            "quantity": _parse_float(event.get("quantity") or event.get("shares")),
+                            "price": _parse_float(event.get("price")),
                             "outcome": event.get("outcome"),
-                            "t": event.get("t"),
+                            "t": event.get("t") or event.get("createdAt"),
                             "created_at": event.get("createdAt"),
                             "display_name": event.get("displayName"),
                         }
@@ -3492,9 +3583,8 @@ def create_app() -> Flask:
                     ],
                 }
             )
-
-        users.sort(key=lambda item: item.get("updated_at", item.get("created_at", 0)), reverse=True)
-        return jsonify({"users": users, "total_users": len(users), "total_transactions": len(events)})
+        except Exception as exc:
+            return jsonify({"error": "admin_user_detail_failed", "detail": str(exc)}), 500
 
     @app.get("/api/admin/verification")
     @require_auth
@@ -3616,7 +3706,7 @@ def create_app() -> Flask:
         try:
             data = admin_query({"withdrawal_requests": {}})
             rows = _as_list(data.get("withdrawal_requests"))
-            rows.sort(key=lambda item: item.get("createdAt", 0), reverse=True)
+            rows.sort(key=lambda item: _row_time_ms(item, "createdAt", "created_at", "updatedAt", "updated_at"), reverse=True)
         except Exception as exc:
             return jsonify({"error": "withdrawals_load_failed", "detail": str(exc)}), 500
         return jsonify(
@@ -4041,7 +4131,7 @@ def create_app() -> Flask:
             }
             for event in trade_events
         ]
-        market_events_recent.sort(key=lambda item: item.get("timestamp") or "", reverse=True)
+        market_events_recent.sort(key=lambda item: _to_ms(item.get("timestamp")), reverse=True)
 
         resolution_log = [
             {

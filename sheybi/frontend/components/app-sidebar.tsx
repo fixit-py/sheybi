@@ -107,7 +107,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   const navigationItems = [
     {
       title: "Home",
-      url: "/",
+      url: "/user",
       icon: HomeIcon,
     },
     {
@@ -151,7 +151,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
               <SidebarMenuButton
                 size="lg"
                 className="hover:bg-transparent active:bg-transparent"
-                render={<Link href="/" />}
+                render={<Link href="/user" />}
               >
                 <div className="flex items-center gap-3">
                   <div className="flex size-9 items-center justify-center rounded-xl bg-[#4F46E5] text-white shadow-sm">

@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useAuth } from "@clerk/nextjs";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -114,16 +115,15 @@ type AdminUser = {
   verified: boolean;
   verification_status: string | null;
   verification_ready: boolean;
+  verification_tier1_complete?: boolean | null;
+  verification_tier2_complete?: boolean | null;
   terms_accepted: boolean;
   terms_accepted_at: number | string | null;
   terms_version: string | null;
   id_document_type: string | null;
-  id_document_image_path: string | null;
   id_document_url: string | null;
   age_proof_type: string | null;
-  age_proof_image_path: string | null;
   age_proof_url: string | null;
-  selfie_image_path: string | null;
   selfie_url: string | null;
   bank_validation_status: string | null;
   bank_name: string | null;
@@ -149,8 +149,21 @@ type AdminUser = {
   transactions: AdminTransaction[];
 };
 
+type AdminUserSummary = {
+  user_id: string;
+  display_name: string | null;
+  handle: string | null;
+  verified: boolean;
+  verification_status: string | null;
+  verification_ready: boolean;
+  wallet_balance: number;
+  currency: string;
+  created_at: number | string | null;
+  updated_at: number | string | null;
+};
+
 type AdminAuditResponse = {
-  users: AdminUser[];
+  users: AdminUserSummary[];
   total_users: number;
   total_transactions: number;
 };
@@ -166,6 +179,8 @@ type AdminVerificationItem = {
   document_url: string | null;
   age_proof_url: string | null;
   selfie_url: string | null;
+  verification_tier1_complete?: boolean | null;
+  verification_tier2_complete?: boolean | null;
   submitted_at: number | string | null;
   reviewed_at: number | string | null;
   notes: string | null;
@@ -356,10 +371,12 @@ export default function AdminConsole() {
   const [audit, setAudit] = useState<AdminAuditResponse | null>(null);
   const [verifications, setVerifications] = useState<AdminVerificationItem[]>([]);
   const [withdrawals, setWithdrawals] = useState<AdminWithdrawalItem[]>([]);
-  const [adminSection, setAdminSection] = useState<AdminSection>("overview");
+  const [selectedUserDetail, setSelectedUserDetail] = useState<AdminUser | null>(null);
+  const [adminSection, setAdminSection] = useState<AdminSection | "">("overview");
   const [selectedMarketId, setSelectedMarketId] = useState<string>("");
   const [selectedResolvedMarketId, setSelectedResolvedMarketId] = useState<string>("");
   const [selectedUserId, setSelectedUserId] = useState<string>("");
+  const [selectedUserDetailLoading, setSelectedUserDetailLoading] = useState(false);
   const [resolutionByMarket, setResolutionByMarket] = useState<Record<string, string>>({});
   const [tradeUserFilter, setTradeUserFilter] = useState("");
   const [tradeMarketFilter, setTradeMarketFilter] = useState("");
@@ -384,28 +401,23 @@ export default function AdminConsole() {
     try {
       const token = await getToken();
       const headers = { Authorization: token ? `Bearer ${token}` : "" };
-      const [dashboardRes, auditRes, verificationsRes, withdrawalsRes] = await Promise.all([
+      const [dashboardRes, verificationsRes, withdrawalsRes] = await Promise.all([
         fetch("/api/flask/admin/dashboard", { headers }),
-        fetch("/api/flask/admin/users", { headers }),
         fetch("/api/flask/admin/verification", { headers }),
         fetch("/api/flask/admin/withdrawals", { headers }),
       ]);
-      const [dashboardJson, auditJson, verificationsJson, withdrawalsJson] = await Promise.all([
+      const [dashboardJson, verificationsJson, withdrawalsJson] = await Promise.all([
         readJson(dashboardRes),
-        readJson(auditRes),
         readJson(verificationsRes),
         readJson(withdrawalsRes),
       ]);
       if (!dashboardRes.ok) throw new Error(`dashboard HTTP ${dashboardRes.status}`);
-      if (!auditRes.ok) throw new Error(`audit HTTP ${auditRes.status}`);
       if (!verificationsRes.ok) throw new Error(`verification HTTP ${verificationsRes.status}`);
       if (!withdrawalsRes.ok) throw new Error(`withdrawals HTTP ${withdrawalsRes.status}`);
       const nextDashboard = dashboardJson as DashboardResponse;
-      const nextAudit = auditJson as AdminAuditResponse;
       const nextVerifications = (verificationsJson as { verifications?: AdminVerificationItem[] })?.verifications ?? [];
       const nextWithdrawals = (withdrawalsJson as { withdrawals?: AdminWithdrawalItem[] })?.withdrawals ?? [];
       setDashboard(nextDashboard);
-      setAudit(nextAudit);
       setVerifications(nextVerifications as AdminVerificationItem[]);
       setWithdrawals(nextWithdrawals as AdminWithdrawalItem[]);
       setResolutionByMarket((current) => {
@@ -427,10 +439,6 @@ export default function AdminConsole() {
         if (current && resolvedMarkets.some((market) => market.id === current)) return current;
         return "";
       });
-      setSelectedUserId((current) => {
-        if (current && nextAudit.users.some((user) => user.user_id === current)) return current;
-        return nextAudit.users[0]?.user_id ?? "";
-      });
       setLastLoadedAt(Date.now());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -439,8 +447,29 @@ export default function AdminConsole() {
     }
   }, [getToken]);
 
+  const loadUsers = useCallback(async () => {
+    try {
+      const token = await getToken();
+      const res = await fetch("/api/flask/admin/users", {
+        headers: { Authorization: token ? `Bearer ${token}` : "" },
+      });
+      const json = await readJson(res);
+      if (!res.ok) throw new Error((json as { error?: string })?.error || `HTTP ${res.status}`);
+      const nextAudit = json as AdminAuditResponse;
+      setAudit(nextAudit);
+      setSelectedUserId((current) => {
+        if (current && nextAudit.users.some((user) => user.user_id === current)) return current;
+        return nextAudit.users[0]?.user_id ?? "";
+      });
+    } catch (e) {
+      setAudit({ users: [], total_users: 0, total_transactions: 0 });
+      setSelectedUserId("");
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [getToken]);
+
   const postAdminAction = useCallback(
-    async (path: string, body?: Record<string, unknown>) => {
+    async (path: string, body?: Record<string, unknown>, successMessage = "Saved.") => {
       setBusy(true);
       setError(null);
       try {
@@ -455,7 +484,7 @@ export default function AdminConsole() {
         });
         const json = await readJson(res);
         if (!res.ok) throw new Error((json as { error?: string })?.error || `HTTP ${res.status}`);
-        setSuccess("Updated.");
+        setSuccess(successMessage);
         await load();
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
@@ -478,10 +507,12 @@ export default function AdminConsole() {
   const users = useMemo(() => audit?.users ?? [], [audit?.users]);
   const openMarkets = useMemo(() => dashboard?.open_markets ?? [], [dashboard?.open_markets]);
   const resolvedMarkets = useMemo(() => dashboard?.resolved_markets ?? [], [dashboard?.resolved_markets]);
-  const selectedUser = useMemo(
+  const selectedUserSummary = useMemo(
     () => users.find((user) => user.user_id === selectedUserId) ?? users[0] ?? null,
     [selectedUserId, users],
   );
+  const selectedUser = selectedUserDetail;
+  const selectedUserLoading = selectedUserDetailLoading && Boolean(selectedUserSummary && !selectedUser);
   const selectedUserWithdrawals = useMemo(() => selectedUser?.withdrawals ?? [], [selectedUser]);
   const selectedUserDeposits = useMemo(() => selectedUser?.deposits ?? [], [selectedUser]);
   const selectedMarket = useMemo(
@@ -507,6 +538,60 @@ export default function AdminConsole() {
       return true;
     });
   }, [dashboard?.trade_audit, tradeDateFilter, tradeMarketFilter, tradeTypeFilter, tradeUserFilter]);
+
+  useEffect(() => {
+    if (adminSection !== "users" || !selectedUserId) {
+      setSelectedUserDetail(null);
+      setSelectedUserDetailLoading(false);
+      return;
+    }
+    let active = true;
+    const loadSelectedUser = async () => {
+      try {
+        setSelectedUserDetailLoading(true);
+        const token = await getToken();
+        const res = await fetch(`/api/flask/admin/users/${selectedUserId}`, {
+          headers: { Authorization: token ? `Bearer ${token}` : "" },
+        });
+        const json = await readJson(res);
+        if (!active) return;
+        if (!res.ok) {
+          throw new Error((json as { error?: string })?.error || `HTTP ${res.status}`);
+        }
+        setSelectedUserDetail(json as AdminUser);
+      } catch (e) {
+        if (!active) return;
+        setSelectedUserDetail(null);
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (active) {
+          setSelectedUserDetailLoading(false);
+        }
+      }
+    };
+    void loadSelectedUser();
+    return () => {
+      active = false;
+    };
+  }, [adminSection, getToken, selectedUserId]);
+
+  useEffect(() => {
+    if (adminSection !== "users" || audit) {
+      return;
+    }
+    void loadUsers();
+  }, [adminSection, audit, loadUsers]);
+
+  useEffect(() => {
+    if (!adminSection) return;
+    const poll = window.setInterval(() => {
+      void load();
+      if (adminSection === "users") {
+        void loadUsers();
+      }
+    }, 15000);
+    return () => window.clearInterval(poll);
+  }, [adminSection, load, loadUsers]);
 
   const createMarket = async () => {
     setBusy(true);
@@ -676,27 +761,40 @@ export default function AdminConsole() {
           <span>Market close is the only admin action that stays intentionally manual.</span>
         </div>
 
-        <div className="mt-5 flex flex-wrap gap-2 border-t border-zinc-200 pt-5 dark:border-zinc-800">
-          {[
-            ["overview", "Overview"],
-            ["verification", "Verification"],
-            ["markets", "Markets"],
-            ["audit", "Audit"],
-            ["users", "Users"],
-          ].map(([key, label]) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => setAdminSection(key as AdminSection)}
-              className={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
-                adminSection === key
-                  ? "border-zinc-950 bg-zinc-950 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-950"
-                  : "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-black dark:text-zinc-300 dark:hover:bg-zinc-900"
-              }`}
-            >
-              {label}
-            </button>
-          ))}
+        <div className="mt-5 border-t border-zinc-200 pt-5 dark:border-zinc-800">
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+            {[
+              { key: "overview", label: "Overview", desc: "Reserve, exposure, and engine health." },
+              { key: "verification", label: "Verification", desc: "Identity review queue and withdrawals." },
+              { key: "markets", label: "Markets", desc: "Open market detail, settlement, archive." },
+              { key: "audit", label: "Audit", desc: "Trades, risk events, resolution log." },
+              { key: "users", label: "Users", desc: "Risk rankings and user drilldown." },
+            ].map(({ key, label, desc }) => {
+              const active = adminSection === key;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setAdminSection((current) => (current === key ? "" : (key as AdminSection)))}
+                  className={`rounded-3xl border p-4 text-left transition-colors ${
+                    active
+                      ? "border-zinc-950 bg-zinc-950 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-950"
+                      : "border-zinc-200 bg-white text-zinc-900 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-black dark:text-zinc-50 dark:hover:bg-zinc-900"
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm font-semibold">{label}</div>
+                    <div className="text-[11px] uppercase tracking-[0.18em] opacity-70">
+                      {active ? "Open" : "Expand"}
+                    </div>
+                  </div>
+                  <div className={`mt-2 text-xs leading-5 ${active ? "opacity-90" : "text-zinc-500 dark:text-zinc-400"}`}>
+                    {desc}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
         </div>
       </div>
 
@@ -828,53 +926,76 @@ export default function AdminConsole() {
                   Manual review before withdrawals can be requested.
                 </p>
               </div>
-              <div className="text-xs text-zinc-500 dark:text-zinc-400">
+              <div className="rounded-full border border-zinc-200 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
                 {verifications.length} submissions
               </div>
             </div>
 
-            <div className="mt-4 space-y-3">
+            <div className="mt-5 space-y-4">
               {verifications.length ? (
                 verifications.map((item) => (
-                  <div key={item.user_id || `${item.display_name}-${item.submitted_at}`} className="rounded-2xl bg-zinc-50 p-4 dark:bg-zinc-900">
-                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                      <div>
-                        <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+                  <div
+                    key={item.user_id || `${item.display_name}-${item.submitted_at}`}
+                    className="rounded-3xl border border-zinc-200 bg-zinc-50 p-5 dark:border-zinc-800 dark:bg-zinc-900"
+                  >
+                    <div className="flex flex-col gap-3 border-b border-zinc-200 pb-4 dark:border-zinc-800 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="min-w-0">
+                        <div className="truncate text-base font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
                           {item.display_name || item.handle || item.user_id || "User"}
                         </div>
-                        <div className="text-xs text-zinc-500 dark:text-zinc-400">
+                        <div className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
                           {item.handle ? `@${item.handle}` : item.user_id || "—"}
                         </div>
                       </div>
-                      <div className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-zinc-700 dark:bg-zinc-950 dark:text-zinc-300">
-                        {item.verification_status || "unsubmitted"}
+                      <div className="flex flex-wrap gap-2">
+                        <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-zinc-700 dark:bg-zinc-950 dark:text-zinc-300">
+                          {item.verification_status || "unsubmitted"}
+                        </span>
+                        <span className="rounded-full border border-zinc-200 px-3 py-1 text-xs font-semibold text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+                          {item.verified ? "Verified" : "Pending"}
+                        </span>
                       </div>
                     </div>
-                      <div className="mt-3 grid grid-cols-2 gap-3 text-xs text-zinc-600 dark:text-zinc-300">
-                        <span>Document: {item.id_document_type || "—"}</span>
-                        <span>BVN: {item.bvn_number ? `${String(item.bvn_number).slice(0, 3)}••••${String(item.bvn_number).slice(-2)}` : "—"}</span>
-                        <span>Submitted: {formatIso(item.submitted_at)}</span>
-                        <span>Reviewed: {formatIso(item.reviewed_at)}</span>
-                        <span>Verified: {item.verified ? "Yes" : "No"}</span>
+
+                    <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                      <InfoLine label="Tier 1" value={item.verification_tier1_complete ? "Complete" : "Pending"} />
+                      <InfoLine label="Tier 2" value={item.verification_tier2_complete ? "Complete" : "Pending"} />
+                      <InfoLine label="ID type" value={item.id_document_type || "—"} />
+                      <InfoLine
+                        label="BVN"
+                        value={
+                          item.bvn_number ? `${String(item.bvn_number).slice(0, 3)}••••${String(item.bvn_number).slice(-2)}` : "—"
+                        }
+                      />
+                      <InfoLine label="Submitted" value={formatIso(item.submitted_at)} />
+                      <InfoLine label="Reviewed" value={formatIso(item.reviewed_at)} />
+                      <InfoLine label="Verified" value={item.verified ? "Yes" : "No"} />
+                    </div>
+
+                    <div className="mt-4">
+                      <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
+                        Evidence
                       </div>
-                      <div className="mt-3 grid gap-3 lg:grid-cols-3">
-                        <VerificationPreview href={item.document_url} label="ID" />
-                        <VerificationPreview href={item.age_proof_url} label="Age proof" />
+                      <div className="grid gap-3 lg:grid-cols-3">
+                        <VerificationPreview href={item.document_url} label="Tier 1 document" />
+                        <VerificationPreview href={item.age_proof_url} label="Tier 2 document" />
                         <VerificationPreview href={item.selfie_url} label="Selfie" />
                       </div>
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        <button
+                    </div>
+
+                    <div className="mt-4 flex flex-wrap gap-2 border-t border-zinc-200 pt-4 dark:border-zinc-800">
+                      <button
                         type="button"
-                        onClick={() => item.user_id && void postAdminAction(`/admin/verification/${item.user_id}/approve`)}
-                        className="rounded-full bg-zinc-950 px-3 py-2 text-xs font-semibold text-white dark:bg-zinc-100 dark:text-zinc-950"
+                        onClick={() => item.user_id && void postAdminAction(`/admin/verification/${item.user_id}/approve`, undefined, "Verification approved.")}
+                        className="rounded-full bg-zinc-950 px-4 py-2 text-xs font-semibold text-white dark:bg-zinc-100 dark:text-zinc-950"
                         disabled={!item.user_id}
                       >
                         Approve
                       </button>
                       <button
                         type="button"
-                        onClick={() => item.user_id && void postAdminAction(`/admin/verification/${item.user_id}/reject`, { note: "Rejected by admin" })}
-                        className="rounded-full border border-zinc-200 px-3 py-2 text-xs font-semibold text-zinc-700 dark:border-zinc-800 dark:text-zinc-300"
+                        onClick={() => item.user_id && void postAdminAction(`/admin/verification/${item.user_id}/reject`, { note: "Rejected by admin" }, "Verification rejected.")}
+                        className="rounded-full border border-zinc-200 px-4 py-2 text-xs font-semibold text-zinc-700 dark:border-zinc-800 dark:text-zinc-300"
                         disabled={!item.user_id}
                       >
                         Reject
@@ -946,14 +1067,14 @@ export default function AdminConsole() {
                     <div className="mt-3 flex flex-wrap gap-2">
                       <button
                         type="button"
-                        onClick={() => void postAdminAction(`/admin/withdrawals/${item.id}/approve`)}
+                        onClick={() => void postAdminAction(`/admin/withdrawals/${item.id}/approve`, undefined, "Withdrawal approved.")}
                         className="rounded-full bg-zinc-950 px-3 py-2 text-xs font-semibold text-white dark:bg-zinc-100 dark:text-zinc-950"
                       >
                         Approve
                       </button>
                       <button
                         type="button"
-                        onClick={() => void postAdminAction(`/admin/withdrawals/${item.id}/reject`, { note: "Rejected by admin" })}
+                        onClick={() => void postAdminAction(`/admin/withdrawals/${item.id}/reject`, { note: "Rejected by admin" }, "Withdrawal rejected.")}
                         className="rounded-full border border-zinc-200 px-3 py-2 text-xs font-semibold text-zinc-700 dark:border-zinc-800 dark:text-zinc-300"
                       >
                         Reject
@@ -1601,7 +1722,7 @@ export default function AdminConsole() {
               </p>
             </div>
             <div className="text-xs text-zinc-500 dark:text-zinc-400">
-              {audit ? `${audit.total_users} users · ${audit.total_transactions} transactions` : "—"}
+              {audit ? `${audit.total_users} users` : "—"}
             </div>
           </div>
 
@@ -1635,9 +1756,6 @@ export default function AdminConsole() {
                         </div>
                         <div className={`mt-2 text-xs font-medium ${active ? "text-zinc-100 dark:text-zinc-700" : "text-zinc-600 dark:text-zinc-300"}`}>
                           {money(user.wallet_balance)}
-                        </div>
-                        <div className={`mt-1 text-xs font-medium ${active ? "text-zinc-100 dark:text-zinc-700" : "text-zinc-600 dark:text-zinc-300"}`}>
-                          {user.transactions.length} transactions
                         </div>
                       </button>
                     );
@@ -1693,21 +1811,16 @@ export default function AdminConsole() {
                       <DetailCard label="Email" value={selectedUser.email || "—"} />
                       <DetailCard label="First name" value={selectedUser.first_name || "—"} />
                       <DetailCard label="Last name" value={selectedUser.last_name || "—"} />
-                      <DetailCard label="Phone" value={selectedUser.phone_number || "—"} />
-                      <DetailCard label="Bio" value={selectedUser.bio || "—"} multiline />
-                      <DetailCard label="Avatar URL" value={selectedUser.avatar_url || "—"} multiline />
                       <DetailCard label="Paystack customer" value={selectedUser.paystack_customer_code || "—"} />
                       <DetailCard label="Verification ref" value={selectedUser.verification_reference || "—"} />
                       <DetailCard label="BVN" value={selectedUser.bvn_number ? `${String(selectedUser.bvn_number).slice(0, 3)}••••${String(selectedUser.bvn_number).slice(-2)}` : "—"} />
+                      <DetailCard label="Tier 1 status" value={selectedUser.verification_tier1_complete ? "Complete" : "Pending"} />
+                      <DetailCard label="Tier 2 status" value={selectedUser.verification_tier2_complete ? "Complete" : "Pending"} />
+                      <DetailCard label="Tier 1 ID" value={selectedUser.id_document_type || "—"} />
+                      <DetailCard label="Tier 2 ID" value={selectedUser.age_proof_type || "—"} />
                       <DetailCard label="Verified name" value={selectedUser.verified_name || "—"} />
                       <DetailCard label="Verified bank" value={selectedUser.verified_bank_account || "—"} multiline />
-                      <DetailCard label="Bank validation" value={selectedUser.bank_validation_status || "—"} />
-                      <DetailCard label="Bank account" value={`${selectedUser.bank_name || "—"} · ${selectedUser.bank_account_number || "—"}`} multiline />
-                      <DetailCard label="Bank account name" value={selectedUser.bank_account_name || "—"} />
                       <DetailCard label="Cooldown until" value={formatIso(selectedUser.withdrawal_cooldown_until)} />
-                      <DetailCard label="Verification notes" value={selectedUser.verification_notes || "—"} multiline />
-                      <DetailCard label="ID document type" value={selectedUser.id_document_type || "—"} />
-                      <DetailCard label="Age proof type" value={selectedUser.age_proof_type || "—"} />
                       <DetailCard label="Verification submitted" value={formatIso(selectedUser.verification_submitted_at)} />
                       <DetailCard label="Verification reviewed" value={formatIso(selectedUser.verification_reviewed_at)} />
                     </div>
@@ -1715,8 +1828,8 @@ export default function AdminConsole() {
                     <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-900">
                       <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">Verification Media</div>
                       <div className="mt-3 grid gap-3">
-                        <VerificationPreview href={selectedUser.id_document_url} label="ID document" />
-                        <VerificationPreview href={selectedUser.age_proof_url} label="Age proof" />
+                        <VerificationPreview href={selectedUser.id_document_url} label="Tier 1 document" />
+                        <VerificationPreview href={selectedUser.age_proof_url} label="Tier 2 document" />
                         <VerificationPreview href={selectedUser.selfie_url} label="Selfie" />
                       </div>
                     </div>
@@ -1860,6 +1973,10 @@ export default function AdminConsole() {
                       )}
                     </div>
                   </div>
+                </div>
+              ) : selectedUserLoading ? (
+                <div className="rounded-2xl border border-dashed border-zinc-200 p-4 text-sm text-zinc-600 dark:border-zinc-800 dark:text-zinc-400">
+                  Loading user details...
                 </div>
               ) : (
                 <div className="rounded-2xl border border-dashed border-zinc-200 p-4 text-sm text-zinc-600 dark:border-zinc-800 dark:text-zinc-400">
@@ -2045,7 +2162,7 @@ function VerificationPreview({
       <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950">
         {src ? (
           <button type="button" onClick={() => setExpanded(true)} className="block w-full text-left">
-            <img src={src} alt={label} className="h-44 w-full object-cover" />
+            <Image src={src} alt={label} width={800} height={440} unoptimized className="h-44 w-full object-cover" />
           </button>
         ) : (
           <div className="flex h-44 items-center justify-center px-3 text-sm text-zinc-500 dark:text-zinc-400">
@@ -2089,7 +2206,14 @@ function VerificationPreview({
             >
               Close
             </button>
-            <img src={src} alt={label} className="max-h-[92vh] max-w-[92vw] object-contain" />
+            <Image
+              src={src}
+              alt={label}
+              width={1600}
+              height={1200}
+              unoptimized
+              className="max-h-[92vh] max-w-[92vw] object-contain"
+            />
           </div>
         </div>
       ) : null}

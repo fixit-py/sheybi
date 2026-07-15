@@ -1,24 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Image from "next/image";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { useAuth } from "@clerk/nextjs";
-import {
-  BadgeCheckIcon,
-  ChevronLeftIcon,
-  ChevronRightIcon,
-  RefreshCwIcon,
-  ShieldAlertIcon,
-  UploadCloudIcon,
-} from "lucide-react";
+import { BadgeCheckIcon, RefreshCwIcon, ShieldAlertIcon, UploadCloudIcon, XIcon } from "lucide-react";
 
-type VerificationStatus = "unsubmitted" | "pending_review" | "approved" | "rejected";
-type DocType = "bvn" | "nin_slip" | "voters_card" | "passport";
+type VerificationStatus = "unsubmitted" | "submitted" | "pending_review" | "approved" | "rejected";
+type DocType = "nin_slip" | "passport" | "voters_card";
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
-
-type BankOption = {
-  name: string;
-  code: string;
-};
 
 type VerificationResponse = {
   user_id: string;
@@ -27,21 +16,28 @@ type VerificationResponse = {
   verified?: boolean;
   verification_status?: VerificationStatus | null;
   verification_ready?: boolean | null;
-  phone_number?: string | null;
+  verification_tier1_complete?: boolean | null;
+  verification_tier2_complete?: boolean | null;
+  verification_tier2_documents?: Array<{ document_type?: string | null }> | null;
   id_document_type?: DocType | null;
+  age_proof_type?: DocType | null;
   document_url?: string | null;
+  age_proof_url?: string | null;
   selfie_url?: string | null;
-  verification_notes?: string | null;
-  bank_validation_status?: string | null;
-  bank_name?: string | null;
-  bank_code?: string | null;
-  bank_account_number?: string | null;
-  bank_account_name?: string | null;
-  bank_validation_checked_at?: number | string | null;
-  bvn_number?: string | null;
   verification_submitted_at?: number | string | null;
-  verification_reviewed_at?: number | string | null;
 };
+
+type DocOption = {
+  value: DocType;
+  label: string;
+  hint: string;
+};
+
+const DOC_OPTIONS: DocOption[] = [
+  { value: "nin_slip", label: "National ID", hint: "NIN slip or national ID card" },
+  { value: "passport", label: "Passport", hint: "Passport bio page" },
+  { value: "voters_card", label: "Voter's card", hint: "Election card / voter ID" },
+];
 
 async function readJson(res: Response) {
   const text = await res.text();
@@ -52,35 +48,17 @@ async function readJson(res: Response) {
   }
 }
 
-function formatIso(value: string | number | null | undefined) {
-  if (value == null) return "—";
-  try {
-    return new Date(value).toLocaleString();
-  } catch {
-    return String(value);
-  }
-}
-
 function docLabel(type: DocType) {
-  switch (type) {
-    case "bvn":
-      return "BVN";
-    case "nin_slip":
-      return "NIN slip";
-    case "voters_card":
-      return "Voter's card";
-    case "passport":
-      return "Passport";
-  }
-  return "Document";
+  return DOC_OPTIONS.find((option) => option.value === type)?.label ?? "Document";
 }
 
 function statusLabel(status: VerificationStatus | null | undefined) {
   switch (status) {
     case "approved":
       return "Approved";
+    case "submitted":
     case "pending_review":
-      return "Pending review";
+      return "Submitted";
     case "rejected":
       return "Rejected";
     default:
@@ -88,27 +66,202 @@ function statusLabel(status: VerificationStatus | null | undefined) {
   }
 }
 
+function normalizeDocType(value: string | null | undefined): DocType {
+  if (value === "nin_slip" || value === "passport" || value === "voters_card") {
+    return value;
+  }
+  return "nin_slip";
+}
+
+function DocPicker({
+  value,
+  selected,
+  disabled,
+  onSelect,
+}: {
+  value: DocType;
+  selected: boolean;
+  disabled?: boolean;
+  onSelect: (value: DocType) => void;
+}) {
+  const option = DOC_OPTIONS.find((item) => item.value === value);
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(value)}
+      disabled={disabled}
+      className={`group rounded-2xl border p-4 text-left transition-all ${
+        selected
+          ? "border-zinc-950 bg-zinc-950 text-white shadow-sm dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-950"
+          : "border-zinc-200 bg-white text-zinc-900 hover:border-zinc-400 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-black dark:text-zinc-50 dark:hover:border-zinc-600 dark:hover:bg-zinc-900"
+      } ${disabled ? "cursor-not-allowed opacity-40" : ""}`}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-semibold">{option?.label ?? "Document"}</div>
+          <div className={`mt-1 text-xs ${selected ? "text-white/70 dark:text-zinc-700" : "text-zinc-500 dark:text-zinc-400"}`}>
+            {option?.hint ?? "Select this document"}
+          </div>
+        </div>
+        <div className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${
+          selected
+            ? "border-white/30 bg-white/15 text-white dark:border-zinc-300 dark:bg-zinc-200 dark:text-zinc-950"
+            : "border-zinc-200 bg-zinc-50 text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400"
+        }`}>
+          {value === "nin_slip" ? "National" : value === "passport" ? "Passport" : "Card"}
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function SelfieModal({
+  open,
+  onClose,
+  videoRef,
+  canvasRef,
+  cameraOn,
+  cameraBusy,
+  cameraError,
+  selfiePreviewUrl,
+  selfieFile,
+  startCamera,
+  stopCamera,
+  captureSelfie,
+  onRetake,
+}: {
+  open: boolean;
+  onClose: () => void;
+  videoRef: RefObject<HTMLVideoElement | null>;
+  canvasRef: RefObject<HTMLCanvasElement | null>;
+  cameraOn: boolean;
+  cameraBusy: boolean;
+  cameraError: string | null;
+  selfiePreviewUrl: string | null;
+  selfieFile: File | null;
+  startCamera: () => Promise<void>;
+  stopCamera: () => void;
+  captureSelfie: () => Promise<void>;
+  onRetake: () => void;
+}) {
+  useEffect(() => {
+    if (!open) stopCamera();
+  }, [open, stopCamera]);
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6 backdrop-blur-sm">
+      <div className="w-full max-w-2xl overflow-hidden rounded-3xl border border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-black">
+        <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
+          <div>
+            <div className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">Live selfie</div>
+            <div className="text-xs text-zinc-500 dark:text-zinc-400">Capture a clear face photo in the pop-up.</div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full border border-zinc-200 p-2 text-zinc-700 hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900"
+          >
+            <XIcon className="size-4" />
+          </button>
+        </div>
+        <div className="p-4">
+          <div className="overflow-hidden rounded-3xl border border-dashed border-zinc-300 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900">
+            <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
+              <span className="text-xs font-medium uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
+                Camera
+              </span>
+              <div className="flex gap-2">
+                {!cameraOn ? (
+                  <button
+                    type="button"
+                    onClick={() => void startCamera()}
+                    disabled={cameraBusy}
+                    className="rounded-full bg-zinc-950 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950"
+                  >
+                    {cameraBusy ? "Starting..." : "Start camera"}
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => void captureSelfie()}
+                      className="rounded-full bg-zinc-950 px-3 py-1.5 text-xs font-semibold text-white dark:bg-zinc-100 dark:text-zinc-950"
+                    >
+                      Capture
+                    </button>
+                    <button
+                      type="button"
+                      onClick={stopCamera}
+                      className="rounded-full border border-zinc-200 px-3 py-1.5 text-xs font-semibold text-zinc-700 dark:border-zinc-800 dark:text-zinc-300"
+                    >
+                      Stop
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+            <div className="relative aspect-[4/3] bg-zinc-950">
+              {selfiePreviewUrl ? (
+                <Image
+                  src={selfiePreviewUrl}
+                  alt="Captured selfie"
+                  fill
+                  unoptimized
+                  className="object-cover"
+                />
+              ) : (
+                <video ref={videoRef} className="absolute inset-0 h-full w-full object-cover" playsInline muted />
+              )}
+              {!selfieFile ? (
+                <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/60 to-transparent px-3 py-2 text-xs text-white">
+                  {cameraOn ? "Look into the camera and tap Capture." : "Use the camera to take a live selfie."}
+                </div>
+              ) : null}
+            </div>
+            <div className="flex items-center justify-between gap-3 px-3 py-2">
+              <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                {selfieFile ? selfieFile.name : "No selfie captured yet."}
+              </span>
+              {selfieFile ? (
+                <button
+                  type="button"
+                  onClick={onRetake}
+                  className="text-xs font-semibold text-zinc-900 underline decoration-zinc-300 underline-offset-4 dark:text-zinc-100"
+                >
+                  Retake
+                </button>
+              ) : null}
+            </div>
+          </div>
+          <canvas ref={canvasRef} className="hidden" />
+          {cameraError ? (
+            <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-800 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200">
+              {cameraError}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function VerificationPanel() {
   const { getToken } = useAuth();
   const [data, setData] = useState<VerificationResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [docType, setDocType] = useState<DocType>("bvn");
-  const [phoneNumber, setPhoneNumber] = useState("");
-  const [bvn, setBvn] = useState("");
-  const [bankOptions, setBankOptions] = useState<BankOption[]>([]);
-  const [bankSearch, setBankSearch] = useState("");
-  const [bankName, setBankName] = useState("");
-  const [bankCode, setBankCode] = useState("");
-  const [bankAccountNumber, setBankAccountNumber] = useState("");
-  const [bankAccountName, setBankAccountName] = useState("");
-  const [documentFile, setDocumentFile] = useState<File | null>(null);
+  const [tier1DocType, setTier1DocType] = useState<DocType>("nin_slip");
+  const [tier1DocumentFile, setTier1DocumentFile] = useState<File | null>(null);
+  const [tier2DocType, setTier2DocType] = useState<DocType>("passport");
+  const [tier2DocumentFile, setTier2DocumentFile] = useState<File | null>(null);
   const [selfieFile, setSelfieFile] = useState<File | null>(null);
+  const [showSelfieModal, setShowSelfieModal] = useState(false);
   const [selfiePreviewUrl, setSelfiePreviewUrl] = useState<string | null>(null);
   const [cameraOn, setCameraOn] = useState(false);
   const [cameraBusy, setCameraBusy] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
-  const [step, setStep] = useState(0);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -118,35 +271,28 @@ export default function VerificationPanel() {
     setError(null);
     try {
       const token = await getToken();
-      const [verificationRes, banksRes] = await Promise.all([
-        fetch("/api/flask/me/verification", {
-          headers: { Authorization: token ? `Bearer ${token}` : "" },
-        }),
-        fetch("/api/flask/paystack/banks", {
-          headers: { Authorization: token ? `Bearer ${token}` : "" },
-        }),
-      ]);
+      const verificationRes = await fetch("/api/flask/me/verification", {
+        headers: { Authorization: token ? `Bearer ${token}` : "" },
+      });
       const json = (await readJson(verificationRes)) as VerificationResponse;
-      const banksJson = (await readJson(banksRes)) as { banks?: BankOption[] };
       if (!verificationRes.ok) throw new Error((json as { error?: string })?.error || `HTTP ${verificationRes.status}`);
-      if (!banksRes.ok) throw new Error((banksJson as { error?: string })?.error || `HTTP ${banksRes.status}`);
-      const nextBanks = (banksJson.banks ?? []).filter((bank) => bank?.name && bank?.code);
       setData(json);
-      setBankOptions(nextBanks);
-      setDocType(json.id_document_type ?? "bvn");
-      setPhoneNumber(json.phone_number ?? "");
-      setBvn(json.bvn_number ?? "");
-      setBankName(json.bank_name ?? nextBanks[0]?.name ?? "");
-      setBankCode(json.bank_code ?? nextBanks[0]?.code ?? "");
-      setBankAccountNumber(json.bank_account_number ?? "");
-      setBankAccountName(json.bank_account_name ?? "");
-      setStep(json.verification_status === "approved" ? 3 : json.verification_status === "pending_review" ? 2 : 0);
+      setTier1DocType(normalizeDocType(json.id_document_type));
+      if (json.verification_tier2_documents?.length) {
+        setTier2DocType(normalizeDocType(json.verification_tier2_documents[0]?.document_type));
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
   }, [getToken]);
+
+  useEffect(() => {
+    if (tier2DocType === tier1DocType) {
+      setTier2DocType(tier1DocType === "nin_slip" ? "passport" : "nin_slip");
+    }
+  }, [tier1DocType, tier2DocType]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -190,10 +336,7 @@ export default function VerificationPanel() {
         throw new Error("Camera not supported on this browser.");
       }
       stopCamera();
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "user" },
-        audio: false,
-      });
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
@@ -233,70 +376,12 @@ export default function VerificationPanel() {
     }
     setSelfieFile(new File([blob], `selfie-${Date.now()}.jpg`, { type: "image/jpeg" }));
     stopCamera();
+    setShowSelfieModal(false);
   }, [stopCamera]);
 
-  const status = data?.verification_status ?? "unsubmitted";
-  const approved = status === "approved" || !!data?.verified;
-  const needsBvn = docType === "bvn";
-  const selectedBank = useMemo(
-    () => bankOptions.find((bank) => bank.name === bankName || bank.code === bankCode) ?? null,
-    [bankCode, bankName, bankOptions],
-  );
-  const filteredBanks = useMemo(() => {
-    const term = bankSearch.trim().toLowerCase();
-    if (!term) return bankOptions;
-    return bankOptions.filter((bank) => bank.name.toLowerCase().includes(term) || bank.code.toLowerCase().includes(term));
-  }, [bankOptions, bankSearch]);
-  const steps = useMemo(
-    () => [
-      { title: "Phone", done: !!phoneNumber || !!data?.phone_number },
-      {
-        title: needsBvn ? "BVN + Bank" : "Document",
-        done: needsBvn
-          ? !!bvn && !!bankName && !!bankAccountNumber && !!bankAccountName
-          : !!documentFile || !!data?.document_url,
-      },
-      { title: "Photo", done: !!selfieFile || !!data?.selfie_url },
-      { title: "Review", done: approved || status === "pending_review" },
-      { title: "Approved", done: approved },
-    ],
-    [
-      approved,
-      data?.document_url,
-      data?.selfie_url,
-      data?.phone_number,
-      documentFile,
-      needsBvn,
-      selfieFile,
-      status,
-      phoneNumber,
-      bvn,
-      bankAccountName,
-      bankAccountNumber,
-      bankName,
-    ],
-  );
-
-  const canSubmit =
-    !!phoneNumber &&
-    !!selfieFile &&
-    (needsBvn ? !!bvn && !!bankName && !!bankAccountNumber && !!bankAccountName : !!documentFile);
-
-  const validateUpload = useCallback(
-    (file: File | null, kind: "document" | "age proof") => {
-      if (!file) return null;
-      if (file.size > MAX_UPLOAD_BYTES) {
-        setError(`${kind} must be 5MB or smaller.`);
-        return null;
-      }
-      return file;
-    },
-    [],
-  );
-
-  const save = async () => {
-    if (!canSubmit) {
-      setError("Capture the selfie and upload the required document first.");
+  const submitTier1 = useCallback(async () => {
+    if (!tier1DocumentFile || !selfieFile) {
+      setError("Pick a document and capture a live selfie first.");
       return;
     }
     setBusy(true);
@@ -304,18 +389,10 @@ export default function VerificationPanel() {
     try {
       const token = await getToken();
       const form = new FormData();
-      form.set("document_type", docType);
-      form.set("phone_number", phoneNumber);
-      form.set("selfie_image", selfieFile as File);
-      if (needsBvn) {
-        form.set("bvn", bvn);
-        form.set("bank_name", bankName);
-        form.set("bank_code", bankCode || selectedBank?.code || "");
-        form.set("bank_account_number", bankAccountNumber);
-        form.set("bank_account_name", bankAccountName);
-      } else {
-        form.set("document_image", documentFile as File);
-      }
+      form.set("verification_tier", "tier1");
+      form.set("document_type", tier1DocType);
+      form.set("document_image", tier1DocumentFile);
+      form.set("selfie_image", selfieFile);
       const res = await fetch("/api/flask/me/verification", {
         method: "POST",
         headers: { Authorization: token ? `Bearer ${token}` : "" },
@@ -324,406 +401,315 @@ export default function VerificationPanel() {
       const json = await readJson(res);
       if (!res.ok) throw new Error((json as { error?: string })?.error || `HTTP ${res.status}`);
       setData(json as VerificationResponse);
-      setStep(json.verification_status === "approved" ? 3 : 2);
+      setTier1DocumentFile(null);
+      setSelfieFile(null);
+      setShowSelfieModal(false);
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
-  };
+  }, [getToken, load, selfieFile, tier1DocType, tier1DocumentFile]);
+
+  const submitTier2 = useCallback(async () => {
+    if (!tier2DocumentFile) {
+      setError("Pick one additional document for tier 2.");
+      return;
+    }
+    if (tier2DocType === tier1DocType) {
+      setError("Tier 2 must use a different document than tier 1.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const token = await getToken();
+      const form = new FormData();
+      form.set("verification_tier", "tier2");
+      form.set("document_type", tier2DocType);
+      form.set("document_image", tier2DocumentFile);
+      const res = await fetch("/api/flask/me/verification", {
+        method: "POST",
+        headers: { Authorization: token ? `Bearer ${token}` : "" },
+        body: form,
+      });
+      const json = await readJson(res);
+      if (!res.ok) throw new Error((json as { error?: string })?.error || `HTTP ${res.status}`);
+      setData(json as VerificationResponse);
+      setTier2DocumentFile(null);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [getToken, load, tier1DocType, tier2DocType, tier2DocumentFile]);
+
+  const status = data?.verification_status ?? "unsubmitted";
+  const approved = status === "approved" || !!data?.verified;
+  const tier1Complete = !!data?.verification_tier1_complete;
+  const tier2Complete = !!data?.verification_tier2_complete;
+  const locked = approved || tier2Complete;
+  const showTier1 = (!approved && (!tier1Complete || status === "rejected") && !tier2Complete);
+  const showTier2 = approved && tier1Complete && !tier2Complete;
 
   return (
-    <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-black sm:p-6">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-              <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">Verification</div>
-              <div className="mt-1 max-w-2xl text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-                Submit your BVN, supported bank details and a live selfie. If
-                the bank lookup matches, verification auto-approves and no admin
-                review is needed.
-              </div>
+    <section className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-black sm:p-6">
+      <div className="flex flex-col gap-4 border-b border-zinc-200 pb-5 dark:border-zinc-800 sm:flex-row sm:items-start sm:justify-between">
+        <div className="space-y-2">
+          <div className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-zinc-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
+            Verification
+          </div>
+          <div>
+            <h2 className="text-2xl font-semibold tracking-tight text-zinc-950 dark:text-zinc-50">
+              Identity check
+            </h2>
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-zinc-600 dark:text-zinc-400">
+              Complete tier 1 to unlock tier 2. After tier 2, the form locks and only your status remains.
+            </p>
+          </div>
         </div>
-        <button
-          type="button"
-          onClick={load}
-          disabled={busy}
-          className="inline-flex items-center gap-2 rounded-lg border border-zinc-200 px-3 py-2 text-sm font-medium text-zinc-800 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-900"
-        >
-          <RefreshCwIcon className="size-4" />
-          Refresh
-        </button>
+        <div className="flex items-center gap-3 self-start">
+          <div
+            className={`rounded-full px-3 py-1.5 text-xs font-semibold ${
+              approved
+                ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-200"
+                : status === "rejected"
+                  ? "bg-red-100 text-red-800 dark:bg-red-950/60 dark:text-red-200"
+                  : "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-200"
+            }`}
+          >
+            {statusLabel(status)}
+          </div>
+          <button
+            type="button"
+            onClick={load}
+            disabled={busy}
+            className="inline-flex items-center gap-2 rounded-lg border border-zinc-200 px-3 py-2 text-sm font-medium text-zinc-800 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-900"
+          >
+            <RefreshCwIcon className="size-4" />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {error ? (
         <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200">
-          Error: {error}
+          {error}
         </div>
       ) : null}
 
-      <div className="mt-5 grid gap-3 sm:grid-cols-4">
-        {steps.map((item, index) => (
-          <div
-            key={item.title}
-            className={`rounded-2xl border px-3 py-3 text-xs font-semibold uppercase tracking-[0.18em] ${
-              item.done
-                ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-200"
-                : step === index
-                  ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-950"
-                  : "border-zinc-200 bg-white text-zinc-500 dark:border-zinc-800 dark:bg-black dark:text-zinc-400"
-            }`}
-          >
-            {item.title}
-          </div>
-        ))}
-      </div>
-
-      <div className="mt-5 grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
-        <div className="space-y-4">
-          <div className="rounded-2xl bg-zinc-50 p-5 dark:bg-zinc-900">
-            <div className="text-xs uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">Status</div>
-            <div className="mt-3 flex items-center gap-3">
-              <div
-                className={`flex size-12 items-center justify-center rounded-2xl ${
-                  approved
-                    ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300"
-                    : status === "rejected"
-                      ? "bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300"
-                      : "bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300"
-                }`}
-              >
-                {approved ? <BadgeCheckIcon className="size-6" /> : <ShieldAlertIcon className="size-6" />}
+      <div className="mt-6 grid gap-4">
+        <div className="rounded-2xl bg-zinc-50 p-5 dark:bg-zinc-900">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="text-xs uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
+                Verification status
               </div>
-              <div>
-                <div className="text-xl font-semibold text-zinc-900 dark:text-zinc-50">{statusLabel(status)}</div>
-                <div className="text-sm text-zinc-600 dark:text-zinc-400">
-                  {approved
-                    ? "Your verification is approved. Withdrawals are enabled."
-                    : status === "pending_review"
-                      ? "Your documents are waiting for admin review."
-                      : "Submit your BVN, bank details and live selfie. Matching bank records auto-approve without admin review."}
-                </div>
+              <div className="mt-2 text-sm leading-6 text-zinc-600 dark:text-zinc-400">
+                {locked
+                  ? "Verification is locked."
+                  : status === "rejected"
+                    ? "Verification was rejected. Tier 1 is open again so you can resubmit."
+                  : approved && tier1Complete
+                    ? "Tier 1 approved. Tier 2 is unlocked."
+                    : tier1Complete
+                      ? "Tier 1 submitted. Waiting for approval to unlock tier 2."
+                      : "Choose an ID, capture a selfie, and submit tier 1."}
               </div>
             </div>
-              <div className="mt-4 flex flex-wrap gap-2">
-                <span className="rounded-full border border-zinc-200 px-4 py-2 text-xs font-semibold text-zinc-600 dark:border-zinc-800 dark:text-zinc-400">
-                BVN auto-approve
-                </span>
-                <span className="rounded-full border border-zinc-200 px-4 py-2 text-xs font-semibold text-zinc-600 dark:border-zinc-800 dark:text-zinc-400">
-                Name: {data?.display_name || data?.handle || "—"}
-              </span>
+            <div
+              className={`flex size-12 items-center justify-center rounded-2xl ${
+                approved
+                  ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300"
+                  : status === "rejected"
+                    ? "bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300"
+                    : "bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300"
+              }`}
+            >
+              {approved ? <BadgeCheckIcon className="size-6" /> : <ShieldAlertIcon className="size-6" />}
             </div>
           </div>
+        </div>
 
-          <div className="rounded-2xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-black">
+        {showTier1 ? (
+          <div className="grid gap-4 rounded-3xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-black">
             <div className="flex items-center gap-2 text-sm font-semibold text-zinc-900 dark:text-zinc-50">
               <UploadCloudIcon className="size-4" />
-              Verification details
+              Tier 1
             </div>
-            <div className="mt-4 grid gap-4">
-              <label className="grid gap-2 text-sm text-zinc-700 dark:text-zinc-300">
-                ID type
-                <select
-                  value={docType}
-                  onChange={(e) => {
-                    const next = e.target.value as DocType;
-                    setDocType(next);
-                    setDocumentFile(null);
-                    setBvn("");
-                    setBankSearch("");
-                    setBankName(bankOptions[0]?.name ?? "");
-                    setBankCode(bankOptions[0]?.code ?? "");
-                    setBankAccountNumber("");
-                    setBankAccountName("");
-                  }}
-                  className="h-11 rounded-xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
-                >
-                  <option value="nin_slip">NIN slip</option>
-                  <option value="voters_card">Voter&apos;s card</option>
-                  <option value="passport">Passport</option>
-                  <option value="bvn">BVN</option>
-                </select>
-              </label>
-
-              <label className="grid gap-2 text-sm text-zinc-700 dark:text-zinc-300">
-                Phone number
-                <input
-                  inputMode="tel"
-                  value={phoneNumber}
-                  onChange={(e) => setPhoneNumber(e.target.value)}
-                  className="h-11 rounded-xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
-                  placeholder="e.g. 08012345678"
+            <div className="grid gap-3 sm:grid-cols-3">
+              {DOC_OPTIONS.map((option) => (
+                <DocPicker
+                  key={option.value}
+                  value={option.value}
+                  selected={tier1DocType === option.value}
+                  onSelect={(value) => setTier1DocType(value)}
                 />
-              </label>
-
-              {needsBvn ? (
-                <>
-                  <label className="grid gap-2 text-sm text-zinc-700 dark:text-zinc-300">
-                    BVN
-                    <input
-                      inputMode="numeric"
-                      value={bvn}
-                      onChange={(e) => setBvn(e.target.value)}
-                      className="h-11 rounded-xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
-                      placeholder="11 digit BVN"
-                    />
-                  </label>
-                  <label className="grid gap-2 text-sm text-zinc-700 dark:text-zinc-300">
-                    Bank search
-                    <input
-                      value={bankSearch}
-                      onChange={(e) => setBankSearch(e.target.value)}
-                      className="h-11 rounded-xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
-                      placeholder="Search bank name"
-                    />
-                  </label>
-                  <label className="grid gap-2 text-sm text-zinc-700 dark:text-zinc-300">
-                    Bank name
-                    <div className="max-h-48 overflow-auto rounded-xl border border-zinc-200 dark:border-zinc-800">
-                      {filteredBanks.length ? (
-                        <div className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                          {filteredBanks.map((bank) => {
-                            const active = bank.name === bankName;
-                            return (
-                              <button
-                                type="button"
-                                key={bank.code}
-                                onClick={() => {
-                                  setBankName(bank.name);
-                                  setBankCode(bank.code);
-                                  setBankSearch(bank.name);
-                                }}
-                                className={`flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm transition-colors ${
-                                  active
-                                    ? "bg-zinc-950 text-white dark:bg-zinc-100 dark:text-zinc-950"
-                                    : "bg-white text-zinc-800 hover:bg-zinc-50 dark:bg-black dark:text-zinc-200 dark:hover:bg-zinc-900"
-                                }`}
-                              >
-                                <span className="min-w-0 truncate">{bank.name}</span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      ) : (
-                        <div className="px-4 py-3 text-sm text-zinc-500 dark:text-zinc-400">
-                          No banks matched your search.
-                        </div>
-                      )}
-                    </div>
-                    <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
-                      Selected: {selectedBank ? selectedBank.name : "—"}
-                    </div>
-                  </label>
-                  <label className="grid gap-2 text-sm text-zinc-700 dark:text-zinc-300">
-                    Account number
-                    <input
-                      inputMode="numeric"
-                      value={bankAccountNumber}
-                      onChange={(e) => setBankAccountNumber(e.target.value)}
-                      className="h-11 rounded-xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
-                      placeholder="0123456789"
-                    />
-                  </label>
-                  <label className="grid gap-2 text-sm text-zinc-700 dark:text-zinc-300">
-                    Account name
-                    <input
-                      value={bankAccountName}
-                      onChange={(e) => setBankAccountName(e.target.value)}
-                      className="h-11 rounded-xl border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-black dark:text-zinc-100 dark:focus:border-zinc-600"
-                      placeholder="Name on the bank account"
-                    />
-                  </label>
-                </>
-              ) : (
-                <label className="grid gap-2 text-sm text-zinc-700 dark:text-zinc-300">
-                  Picture of {docLabel(docType)}
-                  <input
-                    type="file"
-                    accept="image/*"
-                    capture="environment"
-                    onChange={(e) => {
-                      const file = e.target.files?.[0] ?? null;
-                      const nextFile = validateUpload(file, "document");
-                      if (nextFile) {
-                        setError(null);
-                      }
-                      setDocumentFile(nextFile);
-                    }}
-                    className="block w-full rounded-xl border border-dashed border-zinc-300 bg-zinc-50 px-3 py-3 text-sm text-zinc-700 file:mr-4 file:rounded-full file:border-0 file:bg-zinc-950 file:px-4 file:py-2 file:text-sm file:font-medium file:text-white dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:file:bg-zinc-100 dark:file:text-zinc-950"
-                  />
-                  <span className="text-xs text-zinc-500 dark:text-zinc-400">
-                    {documentFile ? documentFile.name : "Capture a clear photo of the document."}
-                  </span>
-                  <span className="text-[11px] text-zinc-400 dark:text-zinc-500">Max 5MB.</span>
-                </label>
-              )}
-              {needsBvn ? (
-              <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-4 text-xs leading-5 text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
-                BVN verification can auto-approve when your bank name, account
-                number and account name match Paystack records. Withdrawals still
-                require the withdrawal account to match your verified name.
-              </div>
-              ) : null}
-
-              <label className="grid gap-2 text-sm text-zinc-700 dark:text-zinc-300">
-                Live selfie
-                <div className="overflow-hidden rounded-2xl border border-dashed border-zinc-300 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900">
-                  <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
-                    <span className="text-xs font-medium uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
-                      Camera
-                    </span>
-                    <div className="flex gap-2">
-                      {!cameraOn ? (
-                        <button
-                          type="button"
-                          onClick={() => void startCamera()}
-                          disabled={cameraBusy}
-                          className="rounded-full bg-zinc-950 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950"
-                        >
-                          {cameraBusy ? "Starting..." : "Start camera"}
-                        </button>
-                      ) : (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() => void captureSelfie()}
-                            className="rounded-full bg-zinc-950 px-3 py-1.5 text-xs font-semibold text-white dark:bg-zinc-100 dark:text-zinc-950"
-                          >
-                            Capture
-                          </button>
-                          <button
-                            type="button"
-                            onClick={stopCamera}
-                            className="rounded-full border border-zinc-200 px-3 py-1.5 text-xs font-semibold text-zinc-700 dark:border-zinc-800 dark:text-zinc-300"
-                          >
-                            Stop
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                  <div className="relative aspect-[4/3] bg-zinc-950">
-                    {selfiePreviewUrl ? (
-                      <img src={selfiePreviewUrl} alt="Captured selfie" className="absolute inset-0 h-full w-full object-cover" />
-                    ) : (
-                      <video ref={videoRef} className="absolute inset-0 h-full w-full object-cover" playsInline muted />
-                    )}
-                    {!selfieFile ? (
-                      <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/60 to-transparent px-3 py-2 text-xs text-white">
-                        {cameraOn ? "Look into the camera and tap Capture." : "Use the camera to take a live selfie."}
-                      </div>
-                    ) : null}
-                  </div>
-                  <div className="flex items-center justify-between gap-3 px-3 py-2">
-                    <span className="text-xs text-zinc-500 dark:text-zinc-400">
-                      {selfieFile ? selfieFile.name : "No selfie captured yet."}
-                    </span>
-                    {selfieFile ? (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSelfieFile(null);
-                          void startCamera();
-                        }}
-                        className="text-xs font-semibold text-zinc-900 underline decoration-zinc-300 underline-offset-4 dark:text-zinc-100"
-                      >
-                        Retake
-                      </button>
-                    ) : null}
-                  </div>
-                </div>
-              </label>
-              <canvas ref={canvasRef} className="hidden" />
-              {cameraError ? (
-                <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-800 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200">
-                  {cameraError}
-                </div>
-              ) : null}
-
+              ))}
             </div>
-          </div>
-
-          <div className="flex items-center justify-between gap-3">
+            <label className="grid gap-2 text-sm text-zinc-700 dark:text-zinc-300">
+              Upload {docLabel(tier1DocType)}
+              <input
+                type="file"
+                accept="image/*"
+                capture="environment"
+                onChange={(e) => {
+                  const file = e.target.files?.[0] ?? null;
+                  if (file && file.size > MAX_UPLOAD_BYTES) {
+                    setError("Document must be 5MB or smaller.");
+                    return;
+                  }
+                  setError(null);
+                  setTier1DocumentFile(file);
+                }}
+                className="block w-full rounded-xl border border-dashed border-zinc-300 bg-zinc-50 px-3 py-3 text-sm text-zinc-700 file:mr-4 file:rounded-full file:border-0 file:bg-zinc-950 file:px-4 file:py-2 file:text-sm file:font-medium file:text-white dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:file:bg-zinc-100 dark:file:text-zinc-950"
+              />
+              <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                {tier1DocumentFile ? tier1DocumentFile.name : "Upload a clear photo of the selected document."}
+              </span>
+            </label>
             <button
               type="button"
-              onClick={save}
-              disabled={busy || !canSubmit}
-              className="inline-flex items-center gap-2 rounded-full bg-zinc-950 px-5 py-3 text-sm font-medium text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-200"
+              onClick={() => setShowSelfieModal(true)}
+              disabled={!tier1DocumentFile}
+              className="inline-flex w-fit items-center gap-2 rounded-full bg-zinc-950 px-5 py-3 text-sm font-medium text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-200"
             >
-              Submit for review
+              Open live selfie
             </button>
-            <div className="text-xs text-zinc-500 dark:text-zinc-400">
-              {approved ? "Approved" : "Pending admin approval"}
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-xs text-zinc-500 dark:text-zinc-400">
+                {selfieFile ? "Selfie captured." : "Selfie capture opens in a pop-up."}
+              </div>
+              <button
+                type="button"
+                onClick={() => void submitTier1()}
+                disabled={busy || !tier1DocumentFile || !selfieFile}
+                className="inline-flex items-center gap-2 rounded-full bg-zinc-950 px-5 py-3 text-sm font-medium text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-200"
+              >
+                Submit tier 1
+              </button>
             </div>
           </div>
-        </div>
+        ) : null}
 
-        <div className="space-y-4">
-          <div className="rounded-2xl bg-zinc-50 p-5 dark:bg-zinc-900">
-            <div className="text-xs uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
-              Submitted
+        {showTier2 ? (
+          <div className="grid gap-4 rounded-3xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-black">
+            <div className="flex items-center gap-2 text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+              <UploadCloudIcon className="size-4" />
+              Tier 2
             </div>
-            <div className="mt-3 space-y-3 text-sm text-zinc-700 dark:text-zinc-300">
-              <div className="flex items-center justify-between gap-3">
-                <span>Document</span>
-                <span className="font-medium text-zinc-900 dark:text-zinc-50">
-                  {data?.id_document_type ? docLabel(data.id_document_type) : "—"}
-                </span>
+            <div className="text-sm text-zinc-600 dark:text-zinc-400">
+              Upload one different document to complete tier 2.
+            </div>
+            <div className="grid gap-3 sm:grid-cols-3">
+              {DOC_OPTIONS.map((option) => (
+                <DocPicker
+                  key={option.value}
+                  value={option.value}
+                  selected={tier2DocType === option.value}
+                  disabled={option.value === tier1DocType}
+                  onSelect={(value) => {
+                    if (value === tier1DocType) {
+                      setError("Tier 2 must use a different document than tier 1.");
+                      return;
+                    }
+                    setError(null);
+                    setTier2DocType(value);
+                  }}
+                />
+              ))}
+            </div>
+            <label className="grid gap-2 text-sm text-zinc-700 dark:text-zinc-300">
+              Upload {docLabel(tier2DocType)}
+              <input
+                type="file"
+                accept="image/*"
+                capture="environment"
+                onChange={(e) => {
+                  const file = e.target.files?.[0] ?? null;
+                  if (file && file.size > MAX_UPLOAD_BYTES) {
+                    setError("Document must be 5MB or smaller.");
+                    return;
+                  }
+                  setError(null);
+                  setTier2DocumentFile(file);
+                }}
+                className="block w-full rounded-xl border border-dashed border-zinc-300 bg-white px-3 py-3 text-sm text-zinc-700 file:mr-4 file:rounded-full file:border-0 file:bg-zinc-950 file:px-4 file:py-2 file:text-sm file:font-medium file:text-white dark:border-zinc-800 dark:bg-black dark:text-zinc-300 dark:file:bg-zinc-100 dark:file:text-zinc-950"
+              />
+              <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                {tier2DocumentFile ? tier2DocumentFile.name : "Upload one additional document."}
+              </span>
+            </label>
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-xs text-zinc-500 dark:text-zinc-400">
+                One additional document completes tier 2.
               </div>
-              <div className="flex items-center justify-between gap-3">
-                <span>Submitted</span>
-                <span className="font-medium text-zinc-900 dark:text-zinc-50">
-                  {formatIso(data?.verification_submitted_at)}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span>Reviewed</span>
-                <span className="font-medium text-zinc-900 dark:text-zinc-50">
-                  {formatIso(data?.verification_reviewed_at)}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span>Document file</span>
-                <span className="font-medium text-zinc-900 dark:text-zinc-50">
-                  {data?.document_url ? "Available" : "—"}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span>Selfie file</span>
-                <span className="font-medium text-zinc-900 dark:text-zinc-50">
-                  {data?.selfie_url ? "Available" : "—"}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span>Bank validation</span>
-                <span className="font-medium text-zinc-900 dark:text-zinc-50">
-                  {data?.bank_validation_status || "—"}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span>Bank account</span>
-                <span className="font-medium text-zinc-900 dark:text-zinc-50">
-                  {data?.bank_account_name || data?.bank_account_number || "—"}
-                </span>
-              </div>
+              <button
+                type="button"
+                onClick={() => void submitTier2()}
+                disabled={busy || !tier2DocumentFile || tier2DocType === tier1DocType}
+                className="inline-flex items-center gap-2 rounded-full bg-zinc-950 px-5 py-3 text-sm font-medium text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-200"
+              >
+                Submit tier 2
+              </button>
             </div>
           </div>
+        ) : null}
 
-          <div className="rounded-2xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-black">
-            <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
-              Review notes
+        {locked ? (
+          <div className="rounded-3xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-black">
+            <div className="flex items-center gap-2 text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+              <BadgeCheckIcon className="size-4" />
+              Verification status
             </div>
-            <div className="mt-2 text-sm leading-6 text-zinc-600 dark:text-zinc-400">
-              {data?.verification_notes || "No notes yet."}
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-900">
+                <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">Tier 1</div>
+                <div className="mt-2 text-sm font-medium text-zinc-900 dark:text-zinc-50">
+                  {tier1Complete ? "Approved" : "Pending review"}
+                </div>
+              </div>
+              <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-900">
+                <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">Tier 2</div>
+                <div className="mt-2 text-sm font-medium text-zinc-900 dark:text-zinc-50">
+                  {tier2Complete ? "Approved" : "Pending review"}
+                </div>
+              </div>
             </div>
-              <div className="mt-4 flex items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs font-medium text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
-              <ChevronLeftIcon className="size-4" />
-              BVN + bank match skips admin review
-              <ChevronRightIcon className="size-4" />
+            <div className="mt-4 text-sm text-zinc-600 dark:text-zinc-400">
+              {approved
+                ? "Identity verified."
+                : status === "rejected"
+                  ? "Verification was rejected. Resubmit tier 1 to try again."
+                  : "Your verification is locked while review is in progress."}
             </div>
           </div>
-        </div>
+        ) : null}
       </div>
+
+      <SelfieModal
+        open={showSelfieModal}
+        onClose={() => {
+          setShowSelfieModal(false);
+          stopCamera();
+        }}
+        videoRef={videoRef}
+        canvasRef={canvasRef}
+        cameraOn={cameraOn}
+        cameraBusy={cameraBusy}
+        cameraError={cameraError}
+        selfiePreviewUrl={selfiePreviewUrl}
+        selfieFile={selfieFile}
+        startCamera={startCamera}
+        stopCamera={stopCamera}
+        captureSelfie={captureSelfie}
+        onRetake={() => {
+          setSelfieFile(null);
+          void startCamera();
+        }}
+      />
     </section>
   );
 }

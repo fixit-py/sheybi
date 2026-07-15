@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAuth } from "@clerk/nextjs";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import MarketCountdown from "@/components/MarketCountdown";
 
 type Market = {
@@ -52,7 +52,7 @@ function money(value: number) {
 }
 
 export default function MarketFeed() {
-  const { getToken } = useAuth();
+  const { getToken, isLoaded, isSignedIn } = useAuth();
   const [markets, setMarkets] = useState<Market[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -85,6 +85,7 @@ export default function MarketFeed() {
     try {
       const token = await getToken();
       const res = await fetch("/api/flask/markets", {
+        cache: "no-store",
         headers: {
           Authorization: token ? `Bearer ${token}` : "",
         },
@@ -101,6 +102,9 @@ export default function MarketFeed() {
   }, [getToken]);
 
   useEffect(() => {
+    if (!isLoaded || !isSignedIn) {
+      return;
+    }
     const initial = window.setTimeout(() => {
       void load();
     }, 0);
@@ -113,8 +117,8 @@ export default function MarketFeed() {
       window.clearTimeout(initial);
       window.clearInterval(timer);
     };
-    // `load` depends on `getToken`; the interval should refresh when auth changes.
-  }, [load]);
+    // Refresh only after Clerk is ready so the protected read path has a token.
+  }, [isLoaded, isSignedIn, load]);
 
   return (
     <section className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm sm:p-6 dark:border-zinc-800 dark:bg-black">

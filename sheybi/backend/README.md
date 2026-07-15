@@ -40,11 +40,13 @@ Optional:
 
 For local testing only, you can bypass Clerk verification:
 
-- `DEV_AUTH=1`
+- `DEV_AUTH` set to a truthy value
 - `X-Dev-User-Id: dev_alice`
 - `X-Dev-User-Name: Alice` optional
 
 Never enable dev auth in production.
+
+Dev auth is disabled by default and must be enabled explicitly with a truthy `DEV_AUTH` value.
 
 ## Simulation
 
